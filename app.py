@@ -3,17 +3,17 @@ import csv
 import io
 import os
 import sqlite3
+import secrets
 from datetime import datetime, date
-from flask import Flask, jsonify, request, render_template_string, Response, session, redirect, url_for, send_file
+from flask import Flask, jsonify, request, render_template_string, Response, session, redirect, url_for, send_file, flash
+import qrcode
+from werkzeug.security import generate_password_hash, check_password_hash
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("PHARM_ERP_SECRET", "pharm-mebel-change-this-secret")
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DATA_DIR = os.path.join(BASE_DIR, "data")
-os.makedirs(DEFAULT_DATA_DIR, exist_ok=True)
-DB_NAME = os.environ.get("PHARM_ERP_DB", os.path.join(DEFAULT_DATA_DIR, "pharm_mebel_erp_pro.db"))
-ADMIN_USER = os.environ.get("PHARM_ERP_ADMIN", "admin")
-ADMIN_PASSWORD = os.environ.get("PHARM_ERP_PASSWORD", "12345")
+DB_NAME = os.environ.get("PHARM_ERP_DB", "pharm_mebel_erp_pro.db")
 
 
 def get_db():
@@ -210,6 +210,51 @@ def init_db():
         amal TEXT NOT NULL,
         tafsilot TEXT DEFAULT ''
     );
+
+    CREATE TABLE IF NOT EXISTS buyurtma_hujjatlari (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        buyurtma_id INTEGER NOT NULL,
+        nomi TEXT NOT NULL,
+        fayl_nomi TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS ishchi_akkauntlari (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ishchi_id INTEGER UNIQUE,
+        telefon TEXT UNIQUE NOT NULL,
+        login TEXT UNIQUE,
+        parol_hash TEXT DEFAULT '',
+        tasdiqlangan INTEGER DEFAULT 0,
+        admin_tasdiq INTEGER DEFAULT 0,
+        faol INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (ishchi_id) REFERENCES ishchilar(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS ishchi_otp (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telefon TEXT NOT NULL,
+        kod_hash TEXT NOT NULL,
+        muddati TEXT NOT NULL,
+        ishlatildi INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS ishchi_topshiriqlari (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ishchi_id INTEGER NOT NULL,
+        buyurtma_kodi TEXT DEFAULT '',
+        ish_turi TEXT NOT NULL,
+        tavsif TEXT DEFAULT '',
+        holat TEXT DEFAULT 'Yangi',
+        progress INTEGER DEFAULT 0,
+        sana TEXT NOT NULL,
+        tugash_sana TEXT DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (ishchi_id) REFERENCES ishchilar(id) ON DELETE CASCADE
+    );
     """)
 
     ishlar = [
@@ -247,6 +292,12 @@ def init_db():
         "INSERT OR IGNORE INTO ombor(nomi,kategoriya,birlik,qoldiq,min_qoldiq,narx) VALUES(?,?,?,?,?,?)",
         materials
     )
+    # V3 migratsiya: mijoz kuzatuv tokeni
+    cols=[r[1] for r in conn.execute("PRAGMA table_info(buyurtmalar)").fetchall()]
+    if "tracking_token" not in cols:
+        conn.execute("ALTER TABLE buyurtmalar ADD COLUMN tracking_token TEXT DEFAULT ''")
+    for row in conn.execute("SELECT id FROM buyurtmalar WHERE tracking_token IS NULL OR tracking_token='' ").fetchall():
+        conn.execute("UPDATE buyurtmalar SET tracking_token=? WHERE id=?",(secrets.token_urlsafe(8),row[0]))
     conn.commit()
     conn.close()
 
@@ -274,7 +325,15 @@ def log_action(amal, tafsilot=''):
 
 @app.before_request
 def require_login():
-    if request.endpoint in {"login", "static"}:
+    public_endpoints = {
+        "login", "static", "public_track", "order_qr",
+        "worker_register", "worker_verify", "worker_login", "worker_logout"
+    }
+    if request.endpoint in public_endpoints or request.path.startswith('/ishchi/public/'):
+        return None
+    if request.path.startswith('/ishchi/'):
+        if not session.get("worker_account_id"):
+            return redirect(url_for("worker_login"))
         return None
     if not session.get("logged_in"):
         return redirect(url_for("login"))
@@ -286,7 +345,7 @@ def login():
     if request.method=='POST':
         user=request.form.get('user','')
         password=request.form.get('password','')
-        if user == ADMIN_USER and password == ADMIN_PASSWORD:
+        if user==os.environ.get('PHARM_ERP_USER','admin') and password==os.environ.get('PHARM_ERP_PASSWORD','12345'):
             session['logged_in']=True
             session['user']=user
             return redirect(url_for('home'))
@@ -430,10 +489,10 @@ def orders():
         d=jdata(); c=get_db()
         try:
             cur=c.execute("""INSERT INTO buyurtmalar(kod,mijoz,telefon,manzil,mahsulot,umumiy_narx,
-            oldindan_tolov,tugash_sana,holat,izoh) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            oldindan_tolov,tugash_sana,holat,izoh,tracking_token) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (d["kod"],d["mijoz"],d.get("telefon",""),d.get("manzil",""),d.get("mahsulot",""),
              float(d.get("umumiy_narx") or 0),float(d.get("oldindan_tolov") or 0),
-             d.get("tugash_sana",""),d.get("holat","Yangi"),d.get("izoh","")))
+             d.get("tugash_sana",""),d.get("holat","Yangi"),d.get("izoh",""),secrets.token_urlsafe(8)))
             oid=cur.lastrowid
             c.executemany("INSERT INTO buyurtma_bosqichlari(buyurtma_id,bosqich) VALUES(?,?)",
                           [(oid,s) for s in STAGES])
@@ -560,6 +619,65 @@ def order_progress(oid):
     c=get_db(); row=c.execute("SELECT COUNT(*) jami,SUM(bajarildi) bajarildi FROM buyurtma_bosqichlari WHERE buyurtma_id=?",(oid,)).fetchone(); c.close()
     jami=row['jami'] or 0; done=row['bajarildi'] or 0; return jsonify({"foiz": round(done*100/jami,1) if jami else 0})
 
+def _order_bundle(oid):
+    c=get_db()
+    order=c.execute("SELECT * FROM buyurtmalar WHERE id=?",(oid,)).fetchone()
+    stages=c.execute("SELECT * FROM buyurtma_bosqichlari WHERE buyurtma_id=? ORDER BY id",(oid,)).fetchall()
+    pays=c.execute("SELECT * FROM buyurtma_tolovlari WHERE buyurtma_id=? ORDER BY sana,id",(oid,)).fetchall()
+    c.close()
+    return order,stages,pays
+
+@app.route("/kuzatuv/<token>")
+def public_track(token):
+    c=get_db(); order=c.execute("SELECT * FROM buyurtmalar WHERE tracking_token=?",(token,)).fetchone()
+    if not order:
+        c.close(); return "Buyurtma topilmadi",404
+    stages=c.execute("SELECT * FROM buyurtma_bosqichlari WHERE buyurtma_id=? ORDER BY id",(order['id'],)).fetchall(); c.close()
+    done=sum(int(x['bajarildi']) for x in stages); pct=round(done*100/len(stages)) if stages else 0
+    html='''<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Buyurtma kuzatuvi</title>
+    <style>body{font-family:Arial;background:#eef3f8;margin:0;padding:18px;color:#172033}.box{max-width:650px;margin:auto;background:white;border-radius:18px;padding:20px;box-shadow:0 8px 30px #0002}h1{color:#1d4ed8}.bar{height:18px;background:#e2e8f0;border-radius:20px;overflow:hidden}.fill{height:100%;background:#16a34a}.stage{padding:10px;border-bottom:1px solid #eee}.ok{color:#15803d}.wait{color:#64748b}</style>
+    <div class="box"><h1>Pharm Mebel</h1><h2>Buyurtma: {{o['kod']}}</h2><p><b>Mijoz:</b> {{o['mijoz']}}</p><p><b>Mahsulot:</b> {{o['mahsulot']}}</p><p><b>Tugash sanasi:</b> {{o['tugash_sana']}}</p><h3>Tayyorlik: {{pct}}%</h3><div class="bar"><div class="fill" style="width:{{pct}}%"></div></div>{% for s in stages %}<div class="stage {{'ok' if s['bajarildi'] else 'wait'}}">{{'✅' if s['bajarildi'] else '⬜'}} {{s['bosqich']}}</div>{% endfor %}</div>'''
+    return render_template_string(html,o=order,stages=stages,pct=pct)
+
+@app.route("/buyurtma/<int:oid>/qr.png")
+def order_qr(oid):
+    c=get_db(); row=c.execute("SELECT tracking_token FROM buyurtmalar WHERE id=?",(oid,)).fetchone(); c.close()
+    if not row:return "Topilmadi",404
+    url=request.url_root.rstrip('/')+url_for('public_track',token=row['tracking_token'])
+    img=qrcode.make(url); out=io.BytesIO(); img.save(out,format='PNG'); out.seek(0)
+    return send_file(out,mimetype='image/png',download_name=f'buyurtma_{oid}_qr.png')
+
+@app.route("/buyurtma/<int:oid>/shartnoma.pdf")
+def order_contract_pdf(oid):
+    order,stages,pays=_order_bundle(oid)
+    if not order:return "Topilmadi",404
+    out=io.BytesIO(); p=canvas.Canvas(out,pagesize=A4); w,h=A4
+    p.setFont('Helvetica-Bold',18); p.drawString(50,h-55,'PHARM MEBEL - BUYURTMA SHARTNOMASI')
+    p.setFont('Helvetica',11); y=h-95
+    lines=[f"Buyurtma kodi: {order['kod']}",f"Sana: {str(order['created_at'])[:10]}",f"Mijoz: {order['mijoz']}",f"Telefon: {order['telefon']}",f"Manzil: {order['manzil']}",f"Mahsulot: {order['mahsulot']}",f"Umumiy narx: {order['umumiy_narx']:,.0f} so'm",f"To'langan: {order['oldindan_tolov']:,.0f} so'm",f"Qoldiq: {order['umumiy_narx']-order['oldindan_tolov']:,.0f} so'm",f"Tugash sanasi: {order['tugash_sana']}",f"Izoh: {order['izoh']}"]
+    for line in lines:p.drawString(55,y,line); y-=22
+    y-=20; p.line(55,y,250,y); p.line(340,y,535,y); p.drawString(90,y-18,'Buyurtmachi imzosi'); p.drawString(385,y-18,'Ijrochi imzosi')
+    p.save(); out.seek(0); return send_file(out,mimetype='application/pdf',as_attachment=True,download_name=f"shartnoma_{order['kod']}.pdf")
+
+@app.route("/buyurtma/<int:oid>/chek.pdf")
+def order_receipt_pdf(oid):
+    order,stages,pays=_order_bundle(oid)
+    if not order:return "Topilmadi",404
+    out=io.BytesIO(); p=canvas.Canvas(out,pagesize=A4); w,h=A4
+    p.setFont('Helvetica-Bold',20); p.drawCentredString(w/2,h-60,'PHARM MEBEL - TOLOV CHEKI')
+    p.setFont('Helvetica',12); y=h-110
+    paid=float(order['oldindan_tolov'] or 0); remaining=float(order['umumiy_narx'] or 0)-paid
+    for line in [f"Buyurtma: {order['kod']}",f"Mijoz: {order['mijoz']}",f"Mahsulot: {order['mahsulot']}",f"Umumiy summa: {order['umumiy_narx']:,.0f} so'm",f"Jami to'langan: {paid:,.0f} so'm",f"Qoldiq: {remaining:,.0f} so'm",f"Chek sanasi: {date.today().isoformat()}"]:
+        p.drawString(70,y,line); y-=25
+    p.drawString(70,y-20,'Rahmat! Pharm Mebel xizmatidan foydalanganingiz uchun.')
+    p.save(); out.seek(0); return send_file(out,mimetype='application/pdf',as_attachment=True,download_name=f"chek_{order['kod']}.pdf")
+
+@app.route("/api/buyurtma/<int:oid>/link")
+def order_public_link(oid):
+    c=get_db(); row=c.execute("SELECT tracking_token FROM buyurtmalar WHERE id=?",(oid,)).fetchone(); c.close()
+    if not row:return jsonify({'message':'Topilmadi'}),404
+    return jsonify({'url':request.url_root.rstrip('/')+url_for('public_track',token=row['tracking_token'])})
+
 @app.route("/backup")
 def backup_db():
     if not os.path.exists(DB_NAME):
@@ -629,17 +747,185 @@ def export_csv():
                     headers={"Content-Disposition":"attachment; filename=jami_hisob.csv"})
 
 
+# ---------- ISHCHI RO'YXATDAN O'TISH VA SHAXSIY KABINET ----------
+def normalize_phone(value):
+    digits=''.join(ch for ch in str(value or '') if ch.isdigit())
+    if digits.startswith('998') and len(digits)==12:
+        return '+'+digits
+    if len(digits)==9:
+        return '+998'+digits
+    return '+'+digits if digits else ''
+
+
+def make_otp():
+    return f"{secrets.randbelow(1000000):06d}"
+
+
+@app.route('/ishchi/royxat', methods=['GET','POST'])
+def worker_register():
+    msg=''; error=''; demo_code=''
+    if request.method=='POST':
+        phone=normalize_phone(request.form.get('telefon'))
+        if len(phone)<10:
+            error='Telefon raqamini to‘g‘ri kiriting.'
+        else:
+            c=get_db()
+            existing=c.execute('SELECT id FROM ishchi_akkauntlari WHERE telefon=?',(phone,)).fetchone()
+            if existing:
+                error='Bu telefon raqami avval ro‘yxatdan o‘tgan.'
+            else:
+                code=make_otp()
+                expires=datetime.now().timestamp()+600
+                c.execute('DELETE FROM ishchi_otp WHERE telefon=?',(phone,))
+                c.execute('INSERT INTO ishchi_otp(telefon,kod_hash,muddati) VALUES(?,?,?)',
+                          (phone,generate_password_hash(code),str(expires)))
+                c.commit(); c.close()
+                session['worker_pending_phone']=phone
+                # Haqiqiy SMS provayder ulanmaguncha kod admin panelida ko‘rinadi.
+                if os.environ.get('DEV_SHOW_OTP','1')=='1':
+                    demo_code=code
+                msg='Tasdiqlash kodi yaratildi. Kodni kiriting.'
+    return render_template_string(WORKER_REGISTER_HTML,msg=msg,error=error,demo_code=demo_code)
+
+
+@app.route('/ishchi/kod', methods=['GET','POST'])
+def worker_verify():
+    phone=session.get('worker_pending_phone','')
+    if not phone:
+        return redirect(url_for('worker_register'))
+    error=''
+    if request.method=='POST':
+        code=request.form.get('kod','').strip()
+        login=request.form.get('login','').strip()
+        password=request.form.get('password','')
+        ism=request.form.get('ism','').strip()
+        familiya=request.form.get('familiya','').strip()
+        if len(login)<3 or len(password)<6 or not ism:
+            error='Ism, kamida 3 belgili login va 6 belgili parol kiriting.'
+        else:
+            c=get_db()
+            row=c.execute('SELECT * FROM ishchi_otp WHERE telefon=? AND ishlatildi=0 ORDER BY id DESC LIMIT 1',(phone,)).fetchone()
+            if not row or float(row['muddati']) < datetime.now().timestamp() or not check_password_hash(row['kod_hash'],code):
+                error='Kod noto‘g‘ri yoki muddati tugagan.'
+            elif c.execute('SELECT 1 FROM ishchi_akkauntlari WHERE login=?',(login,)).fetchone():
+                error='Bu login band. Boshqa login tanlang.'
+            else:
+                # telefon bazadagi ishchiga mos tushsa bog‘laymiz, aks holda yangi ishchi yozuvi ochiladi
+                worker=c.execute('SELECT id FROM ishchilar WHERE telefon=? AND faol=1 LIMIT 1',(phone,)).fetchone()
+                if worker:
+                    worker_id=worker['id']
+                else:
+                    cur=c.execute('INSERT INTO ishchilar(ism,familiya,telefon,lavozim) VALUES(?,?,?,?)',
+                                  (ism,familiya,phone,'Ishchi'))
+                    worker_id=cur.lastrowid
+                c.execute('INSERT INTO ishchi_akkauntlari(ishchi_id,telefon,login,parol_hash,tasdiqlangan,admin_tasdiq) VALUES(?,?,?,?,1,0)',
+                          (worker_id,phone,login,generate_password_hash(password)))
+                c.execute('UPDATE ishchi_otp SET ishlatildi=1 WHERE id=?',(row['id'],))
+                c.commit(); c.close()
+                session.pop('worker_pending_phone',None)
+                return render_template_string(WORKER_WAIT_HTML)
+            c.close()
+    return render_template_string(WORKER_VERIFY_HTML,telefon=phone,error=error)
+
+
+@app.route('/ishchi/login', methods=['GET','POST'])
+def worker_login():
+    error=''
+    if request.method=='POST':
+        login=request.form.get('login','').strip()
+        password=request.form.get('password','')
+        c=get_db(); row=c.execute('SELECT * FROM ishchi_akkauntlari WHERE login=? AND faol=1',(login,)).fetchone(); c.close()
+        if not row or not check_password_hash(row['parol_hash'],password):
+            error='Login yoki parol xato.'
+        elif not row['admin_tasdiq']:
+            error='Admin hali akkauntingizni tasdiqlamagan.'
+        else:
+            session.clear(); session['worker_account_id']=row['id']; session['worker_id']=row['ishchi_id']
+            return redirect(url_for('worker_dashboard'))
+    return render_template_string(WORKER_LOGIN_HTML,error=error)
+
+
+@app.route('/ishchi/logout')
+def worker_logout():
+    session.clear(); return redirect(url_for('worker_login'))
+
+
+@app.route('/ishchi/kabinet')
+def worker_dashboard():
+    wid=session.get('worker_id')
+    c=get_db()
+    worker=c.execute('SELECT * FROM ishchilar WHERE id=?',(wid,)).fetchone()
+    tasks=c.execute('SELECT * FROM ishchi_topshiriqlari WHERE ishchi_id=? ORDER BY sana DESC,id DESC LIMIT 50',(wid,)).fetchall()
+    stats=c.execute('''SELECT COUNT(DISTINCT sana) kun,COALESCE(SUM(ish_soatlari),0) soat FROM keldi_ketdi WHERE ishchi_id=?''',(wid,)).fetchone()
+    result=c.execute('SELECT COALESCE(SUM(miqdor),0) miqdor FROM ish_natijalari WHERE ishchi_id=?',(wid,)).fetchone()
+    rating=round(((worker['sifat_ball']+worker['tezlik_ball']+worker['intizom_ball'])/3.0)+min(float(result['miqdor'] or 0)/100.0,5),2)
+    c.close()
+    return render_template_string(WORKER_DASHBOARD_HTML,worker=worker,tasks=tasks,stats=stats,rating=rating)
+
+
+@app.route('/ishchi/topshiriq/<int:tid>', methods=['POST'])
+def worker_task_update(tid):
+    wid=session.get('worker_id')
+    progress=max(0,min(100,int(request.form.get('progress') or 0)))
+    status=request.form.get('holat','Jarayonda')
+    c=get_db(); c.execute('UPDATE ishchi_topshiriqlari SET progress=?,holat=? WHERE id=? AND ishchi_id=?',(progress,status,tid,wid)); c.commit(); c.close()
+    return redirect(url_for('worker_dashboard'))
+
+
+@app.route('/ishchi-boshqaruv', methods=['GET','POST'])
+def worker_admin():
+    c=get_db()
+    if request.method=='POST':
+        action=request.form.get('action')
+        if action=='approve':
+            aid=int(request.form['account_id']); c.execute('UPDATE ishchi_akkauntlari SET admin_tasdiq=1 WHERE id=?',(aid,))
+        elif action=='block':
+            aid=int(request.form['account_id']); c.execute('UPDATE ishchi_akkauntlari SET faol=0 WHERE id=?',(aid,))
+        elif action=='task':
+            c.execute('''INSERT INTO ishchi_topshiriqlari(ishchi_id,buyurtma_kodi,ish_turi,tavsif,holat,progress,sana,tugash_sana)
+                         VALUES(?,?,?,?,?,?,?,?)''',(
+                int(request.form['ishchi_id']),request.form.get('buyurtma_kodi','').strip(),request.form.get('ish_turi','').strip(),
+                request.form.get('tavsif','').strip(),'Yangi',0,request.form.get('sana') or date.today().isoformat(),request.form.get('tugash_sana','')
+            ))
+        c.commit()
+    accounts=c.execute('''SELECT a.*,i.ism,i.familiya,i.lavozim FROM ishchi_akkauntlari a LEFT JOIN ishchilar i ON i.id=a.ishchi_id ORDER BY a.id DESC''').fetchall()
+    workers=c.execute('SELECT id,ism,familiya,lavozim FROM ishchilar WHERE faol=1 ORDER BY ism').fetchall()
+    tasks=c.execute('''SELECT t.*,i.ism,i.familiya FROM ishchi_topshiriqlari t JOIN ishchilar i ON i.id=t.ishchi_id ORDER BY t.id DESC LIMIT 100''').fetchall()
+    otp_rows=c.execute('SELECT telefon,created_at FROM ishchi_otp WHERE ishlatildi=0 ORDER BY id DESC LIMIT 20').fetchall()
+    c.close()
+    return render_template_string(WORKER_ADMIN_HTML,accounts=accounts,workers=workers,tasks=tasks,otp_rows=otp_rows,today=date.today().isoformat())
+
+
 LOGIN_HTML = r"""
 <!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pharm Mebel ERP - Kirish</title><style>body{margin:0;background:linear-gradient(135deg,#0f1b33,#2563eb);font-family:Arial;display:grid;place-items:center;min-height:100vh}.box{background:#fff;padding:28px;border-radius:18px;width:min(360px,92%);box-shadow:0 20px 50px #0005}h2{margin-top:0}input{width:100%;padding:12px;margin:8px 0;border:1px solid #cbd5e1;border-radius:9px;box-sizing:border-box}button{width:100%;padding:12px;border:0;border-radius:9px;background:#2563eb;color:#fff;font-weight:700}.err{color:#b91c1c;font-size:13px}</style></head><body><form class="box" method="post"><h2>🏭 Pharm Mebel ERP</h2><input name="user" placeholder="Login" value="admin"><input name="password" type="password" placeholder="Parol"><button>Kirish</button><div class="err">{{error}}</div><p style="font-size:12px;color:#64748b">Login va parol server sozlamalarida belgilanadi.</p></form></body></html>
+<title>Pharm Mebel ERP - Kirish</title><style>body{margin:0;background:linear-gradient(135deg,#0f1b33,#2563eb);font-family:Arial;display:grid;place-items:center;min-height:100vh}.box{background:#fff;padding:28px;border-radius:18px;width:min(360px,92%);box-shadow:0 20px 50px #0005}h2{margin-top:0}input{width:100%;padding:12px;margin:8px 0;border:1px solid #cbd5e1;border-radius:9px;box-sizing:border-box}button{width:100%;padding:12px;border:0;border-radius:9px;background:#2563eb;color:#fff;font-weight:700}.err{color:#b91c1c;font-size:13px}</style></head><body><form class="box" method="post"><h2>🏭 Pharm Mebel ERP</h2><input name="user" placeholder="Login" value="admin"><input name="password" type="password" placeholder="Parol"><button>Kirish</button><div class="err">{{error}}</div><p style="font-size:12px;color:#64748b">Standart: admin / 12345</p><hr><p style="text-align:center"><a href="/ishchi/login">👷 Ishchi kirishi</a> · <a href="/ishchi/royxat">Ro‘yxatdan o‘tish</a></p></form></body></html>
 """
+
+WORKER_BASE_STYLE = """
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Arial;background:#eef3f8;color:#182235}.head{background:linear-gradient(135deg,#0f1b33,#2563eb);color:white;padding:18px}.wrap{max-width:1050px;margin:auto;padding:16px}.box,.card{background:white;border-radius:16px;padding:18px;box-shadow:0 8px 24px #0f172a18;margin-bottom:14px}input,select,textarea{width:100%;padding:11px;border:1px solid #cbd5e1;border-radius:9px;margin:5px 0 10px}button,.btn{display:inline-block;border:0;border-radius:9px;padding:10px 14px;background:#2563eb;color:white;font-weight:700;text-decoration:none;cursor:pointer}.green{background:#16a34a}.red{background:#dc2626}.muted{color:#64748b;font-size:13px}.err{color:#b91c1c}.ok{color:#166534}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.stat b{font-size:25px;color:#2563eb}.task{border-left:5px solid #2563eb}.bar{height:10px;background:#e2e8f0;border-radius:20px;overflow:hidden}.bar i{display:block;height:100%;background:#16a34a}table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left}@media(max-width:700px){.grid{grid-template-columns:1fr}.wrap{padding:9px}}
+</style>
+"""
+
+WORKER_REGISTER_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ishchi ro‘yxati</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>👷 Ishchi ro‘yxatdan o‘tishi</b></div><div class="wrap"><form class="box" method="post"><h2>Telefon raqamingiz</h2><p class="muted">Masalan: +998 90 123 45 67</p><input name="telefon" required placeholder="+998901234567"><button>Kod olish</button><p class="ok">{{msg}}</p><p class="err">{{error}}</p>{% if demo_code %}<div class="card"><b>Sinov kodi: {{demo_code}}</b><p class="muted">Haqiqiy SMS xizmati ulanmaguncha shu koddan foydalaning.</p><a class="btn green" href="/ishchi/kod">Kodni kiritish</a></div>{% endif %}<p><a href="/ishchi/login">Akkauntim bor — kirish</a></p></form></div></body></html>"""
+
+WORKER_VERIFY_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kodni tasdiqlash</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>🔐 Telefonni tasdiqlash</b></div><div class="wrap"><form class="box" method="post"><p>{{telefon}}</p><label>Kod</label><input name="kod" inputmode="numeric" maxlength="6" required><label>Ism</label><input name="ism" required><label>Familiya</label><input name="familiya"><label>Yangi login</label><input name="login" required><label>Yangi parol</label><input name="password" type="password" minlength="6" required><button>Ro‘yxatdan o‘tish</button><p class="err">{{error}}</p></form></div></body></html>"""
+
+WORKER_WAIT_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kutilmoqda</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="wrap"><div class="box"><h2>✅ Ro‘yxatdan o‘tdingiz</h2><p>Endi administrator akkauntingizni tasdiqlaydi. Tasdiqlangach login va parolingiz bilan kirasiz.</p><a class="btn" href="/ishchi/login">Kirish sahifasi</a></div></div></body></html>"""
+
+WORKER_LOGIN_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ishchi kirishi</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>🏭 Pharm Mebel — Ishchi kabineti</b></div><div class="wrap"><form class="box" method="post"><h2>Kirish</h2><input name="login" placeholder="Login" required><input name="password" type="password" placeholder="Parol" required><button>Kirish</button><p class="err">{{error}}</p><p><a href="/ishchi/royxat">Yangi ro‘yxatdan o‘tish</a></p></form></div></body></html>"""
+
+WORKER_DASHBOARD_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ishchi kabineti</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><div class="wrap" style="padding:0"><b>👷 {{worker['ism']}} {{worker['familiya']}}</b> — {{worker['lavozim']}} <a class="btn red" style="float:right" href="/ishchi/logout">Chiqish</a></div></div><div class="wrap"><div class="grid"><div class="card stat"><span>REYTING</span><br><b>{{rating}} / 10</b></div><div class="card stat"><span>ISHLAGAN KUN</span><br><b>{{stats['kun'] or 0}}</b></div><div class="card stat"><span>JAMI SOAT</span><br><b>{{'%.1f'|format(stats['soat'] or 0)}}</b></div></div><div class="card"><h3>Ballarim</h3><p>Sifat: <b>{{worker['sifat_ball']}}</b> · Tezlik: <b>{{worker['tezlik_ball']}}</b> · Intizom: <b>{{worker['intizom_ball']}}</b></p><p class="muted">Pul summalari va korxona moliyasi bu kabinetda ko‘rsatilmaydi.</p></div><h2>Topshiriqlarim</h2>{% for t in tasks %}<div class="card task"><b>{{t['ish_turi']}}</b> {% if t['buyurtma_kodi'] %}<span class="muted">— {{t['buyurtma_kodi']}}</span>{% endif %}<p>{{t['tavsif']}}</p><div class="bar"><i style="width:{{t['progress']}}%"></i></div><p><b>{{t['progress']}}%</b> · {{t['holat']}} · {{t['sana']}}</p><form method="post" action="/ishchi/topshiriq/{{t['id']}}"><select name="holat"><option {% if t['holat']=='Yangi' %}selected{% endif %}>Yangi</option><option {% if t['holat']=='Jarayonda' %}selected{% endif %}>Jarayonda</option><option {% if t['holat']=='Tayyor' %}selected{% endif %}>Tayyor</option></select><input type="number" name="progress" min="0" max="100" value="{{t['progress']}}"><button>Yangilash</button></form></div>{% else %}<div class="card">Hozircha topshiriq yo‘q.</div>{% endfor %}</div></body></html>"""
+
+WORKER_ADMIN_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ishchi boshqaruvi</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>👥 Ishchi kabinetlarini boshqarish</b> <a class="btn" style="float:right" href="/">ERP bosh sahifa</a></div><div class="wrap"><div class="grid"><form class="box" method="post"><h3>Yangi topshiriq</h3><input type="hidden" name="action" value="task"><label>Ishchi</label><select name="ishchi_id" required>{% for w in workers %}<option value="{{w['id']}}">{{w['ism']}} {{w['familiya']}} — {{w['lavozim']}}</option>{% endfor %}</select><label>Buyurtma kodi</label><input name="buyurtma_kodi" placeholder="AB-001"><label>Ish turi</label><input name="ish_turi" required placeholder="Kesish / Rover / Yig‘ish"><label>Topshiriq</label><textarea name="tavsif"></textarea><label>Boshlanish</label><input type="date" name="sana" value="{{today}}"><label>Tugash</label><input type="date" name="tugash_sana"><button>Topshiriq berish</button></form><div class="box" style="grid-column:span 2;overflow:auto"><h3>Ro‘yxatdan o‘tganlar</h3><table><tr><th>Ishchi</th><th>Telefon</th><th>Login</th><th>Holat</th><th>Amal</th></tr>{% for a in accounts %}<tr><td>{{a['ism']}} {{a['familiya']}}</td><td>{{a['telefon']}}</td><td>{{a['login'] or ''}}</td><td>{% if a['admin_tasdiq'] %}✅ Tasdiqlangan{% else %}⏳ Kutilmoqda{% endif %}</td><td>{% if not a['admin_tasdiq'] %}<form method="post" style="display:inline"><input type="hidden" name="action" value="approve"><input type="hidden" name="account_id" value="{{a['id']}}"><button class="green">Tasdiqlash</button></form>{% endif %}<form method="post" style="display:inline"><input type="hidden" name="action" value="block"><input type="hidden" name="account_id" value="{{a['id']}}"><button class="red">Bloklash</button></form></td></tr>{% endfor %}</table></div></div><div class="box" style="overflow:auto"><h3>Topshiriqlar</h3><table><tr><th>Ishchi</th><th>Buyurtma</th><th>Ish</th><th>Holat</th><th>Progress</th><th>Sana</th></tr>{% for t in tasks %}<tr><td>{{t['ism']}} {{t['familiya']}}</td><td>{{t['buyurtma_kodi']}}</td><td>{{t['ish_turi']}}</td><td>{{t['holat']}}</td><td>{{t['progress']}}%</td><td>{{t['sana']}}</td></tr>{% endfor %}</table></div><div class="box"><h3>Telefon kodi haqida</h3><p class="muted">Hozir sinov rejimida kod ishchining ekranida ko‘rinadi. Haqiqiy SMS yuborish uchun Eskiz.uz yoki boshqa SMS provayder API kaliti kerak bo‘ladi.</p></div></div></body></html>"""
+
 
 HTML = r"""
 <!doctype html>
 <html lang="uz">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pharm Mebel ERP PRO</title>
+<title>Pharm Mebel ERP Enterprise V3.1</title>
 <style>
 :root{--nav:#0f1b33;--blue:#2563eb;--bg:#eef3f8;--card:#fff;--text:#182235;--muted:#64748b;--danger:#dc2626;--ok:#16a34a}
 *{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:var(--bg);color:var(--text)}
@@ -666,7 +952,7 @@ th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:no
 </style>
 </head>
 <body>
-<header><div class="top"><div><h1>🏭 Pharm Mebel ERP PRO</h1><div class="sub">Ishchilar, buyurtmalar, ombor, ishlab chiqarish va moliya</div></div><div><a href="/backup"><button style="background:#16a34a">Backup</button></a> <a href="/logout"><button style="background:#dc2626">Chiqish</button></a></div></div></header>
+<header><div class="top"><div><h1>🏭 Pharm Mebel ERP Enterprise V3.1</h1><div class="sub">Ishchilar, buyurtmalar, ombor, ishlab chiqarish va moliya</div></div><div><a href="/backup"><button style="background:#16a34a">Backup</button></a> <a href="/logout"><button style="background:#dc2626">Chiqish</button></a></div></div></header>
 <main class="wrap">
 <div class="cards">
  <div class="card"><span>ISHCHILAR</span><b id="dWorkers">0</b></div>
@@ -792,7 +1078,7 @@ async function delWorker(i){if(confirm('O‘chirasizmi?')){await api('/api/ishch
 async function loadTypes(){const a=await api('/api/ish-turlari');$('#workTypeSelect').innerHTML=a.map(x=>`<option value="${x.id}">${x.kategoriya} — ${x.nomi} (${x.birlik})</option>`).join('')}
 async function loadAttendance(){const a=await api('/api/keldi-ketdi');$('#attendanceBody').innerHTML=a.map(x=>`<tr><td>${x.ism} ${x.familiya||''}</td><td>${x.sana}</td><td>${x.keldi_vaqti}</td><td>${x.ketdi_vaqti}</td><td>${x.ish_soatlari}</td></tr>`).join('')}
 async function loadResults(){const a=await api('/api/natijalar');$('#resultsBody').innerHTML=a.map(x=>`<tr><td>${x.ism} ${x.familiya||''}</td><td>${x.ish_turi}</td><td>${x.sana}</td><td>${x.miqdor} ${x.birlik}</td><td>${money(x.jami_haq)}</td><td>${x.buyurtma_kodi||''}</td></tr>`).join('')}
-async function loadOrders(){const a=await api('/api/buyurtmalar');$('#ordersBody').innerHTML=a.map(x=>`<tr><td>${x.kod}</td><td>${x.mijoz}</td><td>${x.mahsulot||''}</td><td>${money(x.umumiy_narx)}</td><td>${money(x.oldindan_tolov)}</td><td class="balance">${money(x.qoldiq)}</td><td><span class="badge">${x.holat}</span></td><td><span id="pr${x.id}">0%</span></td><td><button onclick="openStage(${x.id})">Ko‘rish</button></td><td><button onclick="addOrderPayment(${x.id})">To‘lov</button></td></tr>`).join('')}
+async function loadOrders(){const a=await api('/api/buyurtmalar');$('#ordersBody').innerHTML=a.map(x=>`<tr><td>${x.kod}</td><td>${x.mijoz}</td><td>${x.mahsulot||''}</td><td>${money(x.umumiy_narx)}</td><td>${money(x.oldindan_tolov)}</td><td class="balance">${money(x.qoldiq)}</td><td><span class="badge">${x.holat}</span></td><td><span id="pr${x.id}">0%</span></td><td><button onclick="openStage(${x.id})">Ko‘rish</button></td><td><button onclick="addOrderPayment(${x.id})">To‘lov</button></td><td><a href="/buyurtma/${x.id}/shartnoma.pdf" target="_blank"><button>Shartnoma</button></a> <a href="/buyurtma/${x.id}/chek.pdf" target="_blank"><button>Chek</button></a> <a href="/buyurtma/${x.id}/qr.png" target="_blank"><button class="ok">QR</button></a> <button onclick="copyTrack(${x.id})">Link</button></td></tr>`).join('')}
 async function openStage(id){const a=await api('/api/buyurtma/'+id+'/bosqichlar');$('#stageList').innerHTML=a.map(x=>`<label class="stage"><input type="checkbox" ${x.bajarildi?'checked':''} onchange="toggleStage(${x.id},this.checked)"> ${x.bosqich}</label>`).join('');$('#stageModal').style.display='grid'}
 function closeStage(){$('#stageModal').style.display='none'}
 async function toggleStage(id,v){await api('/api/buyurtma-bosqich/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bajarildi:v})})}
@@ -810,6 +1096,7 @@ async function loadStatuses(){const a=await api('/api/ishchi-holatlari');$('#sta
 async function loadFinished(){const a=await api('/api/tayyor-mahsulot');$('#finishedBody').innerHTML=a.map(x=>`<tr><td>${x.nomi}</td><td>${x.kodi||''}</td><td>${x.rang||''}</td><td>${x.miqdor} ${x.birlik}</td><td>${money(x.narx)}</td></tr>`).join('')}
 async function loadFinance(){const s=$('#finStart').value||'1900-01-01',e=$('#finEnd').value||'2999-12-31',x=await api(`/api/moliyaviy-xulosa?start=${s}&end=${e}`);$('#fIncome').textContent=money(x.kirim);$('#fExpense').textContent=money(x.xarajat);$('#fSalary').textContent=money(x.ishchi_tolov);$('#fBonus').textContent=money(x.bonus);$('#fProfit').textContent=money(x.sof_foyda)}
 async function addOrderPayment(id){const miqdor=prompt('To‘lov summasi');if(!miqdor)return;await api(`/api/buyurtma/${id}/tolovlar`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sana:today,miqdor})});refresh()}
+async function copyTrack(id){const x=await api(`/api/buyurtma/${id}/link`);try{await navigator.clipboard.writeText(x.url);alert('Mijoz kuzatuv havolasi nusxalandi')}catch(e){prompt('Havolani nusxalang:',x.url)}}
 async function loadProgress(){const rows=await api('/api/buyurtmalar');for(const x of rows){try{const p=await api(`/api/buyurtma-progress/${x.id}`),el=$(`#pr${x.id}`);if(el)el.textContent=p.foiz+'%'}catch(e){}}}
 
 async function refresh(){await Promise.all([loadWorkers(),loadTypes(),loadAttendance(),loadResults(),loadOrders(),loadStock(),loadTrips(),loadPayments(),loadPenalties(),loadDashboard(),loadTotals(),loadExpenses(),loadBonuses(),loadStatuses(),loadFinished(),loadFinance(),loadProgress()])}
@@ -818,19 +1105,6 @@ bind('#workerForm','/api/ishchilar');bind('#attendanceForm','/api/keldi-ketdi');
 </body></html>
 """
 
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok", "app": "Pharm Mebel ERP Cloud"})
-
-
-# Gunicorn/import orqali ishga tushganda ham jadvallar yaratiladi.
-init_db()
-
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "5000"))
-    print("=" * 62)
-    print("PHARM MEBEL ERP CLOUD ISHGA TUSHDI")
-    print(f"Mahalliy manzil: http://127.0.0.1:{port}")
-    print("Internet manzili hosting tomonidan beriladi.")
-    print("=" * 62)
-    app.run(host="0.0.0.0", port=port, debug=False)
+    init_db()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",5000)), debug=False)
