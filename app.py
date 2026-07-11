@@ -24,8 +24,61 @@ from reportlab.lib.utils import simpleSplit
 import re
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("PHARM_ERP_SECRET", "pharm-mebel-change-this-secret")
 DB_NAME = os.environ.get("PHARM_ERP_DB", "pharm_mebel_erp_pro.db")
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _get_or_create_secret_key():
+    """PHARM_ERP_SECRET muhit o'zgaruvchisi bo'lmasa, bir martalik tasodifiy
+    kalit yaratib, faylga saqlaydi (har safar ilova qayta ishga tushganda
+    bir xil kalit ishlatilishi uchun, aks holda barcha sessiyalar uziladi)."""
+    env_key = os.environ.get("PHARM_ERP_SECRET")
+    if env_key:
+        return env_key
+    key_path = os.path.join(_APP_DIR, ".secret_key")
+    if os.path.exists(key_path):
+        with open(key_path, "r", encoding="utf-8") as f:
+            saved = f.read().strip()
+            if saved:
+                return saved
+    new_key = secrets.token_hex(32)
+    try:
+        with open(key_path, "w", encoding="utf-8") as f:
+            f.write(new_key)
+    except Exception:
+        pass
+    return new_key
+
+
+def _get_or_create_admin_password():
+    """PHARM_ERP_PASSWORD muhit o'zgaruvchisi bo'lmasa, standart "12345" o'rniga
+    tasodifiy parol yaratib, admin_parol.txt fayliga yozadi va konsolda ko'rsatadi."""
+    env_pwd = os.environ.get("PHARM_ERP_PASSWORD")
+    if env_pwd:
+        return env_pwd
+    pwd_path = os.path.join(_APP_DIR, "admin_parol.txt")
+    if os.path.exists(pwd_path):
+        with open(pwd_path, "r", encoding="utf-8") as f:
+            saved = f.read().strip()
+            if saved:
+                return saved
+    new_pwd = secrets.token_urlsafe(9)
+    try:
+        with open(pwd_path, "w", encoding="utf-8") as f:
+            f.write(new_pwd)
+    except Exception:
+        pass
+    print("=" * 60)
+    print(f"  BIRINCHI ISHGA TUSHIRISH: Rahbar (admin) paroli yaratildi:")
+    print(f"  Login: admin")
+    print(f"  Parol: {new_pwd}")
+    print(f"  (Bu parol '{pwd_path}' fayliga ham yozildi.)")
+    print("=" * 60)
+    return new_pwd
+
+
+app.secret_key = _get_or_create_secret_key()
+_ADMIN_PASSWORD = _get_or_create_admin_password()
 
 
 def get_db():
@@ -906,12 +959,100 @@ def log_action(amal, tafsilot=''):
         pass
 
 
+# ---------- CSRF HIMOYASI ----------
+def get_csrf_token():
+    if 'csrf_token' not in session:
+        session['csrf_token'] = secrets.token_hex(16)
+    return session['csrf_token']
+
+app.jinja_env.globals['csrf_token'] = get_csrf_token
+
+
+def _csrf_valid():
+    token = session.get('csrf_token')
+    sent = request.form.get('csrf_token', '')
+    return bool(token) and secrets.compare_digest(token, sent)
+
+
+# ---------- LOGIN URINISHLARINI CHEKLASH (BRUTE-FORCE HIMOYASI) ----------
+_login_attempts = {}
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_LOCKOUT_SECONDS = 300
+
+def _login_key(username):
+    return f"{request.remote_addr}:{username}"
+
+def _is_login_locked(username):
+    now = datetime.now().timestamp()
+    rec = _login_attempts.get(_login_key(username))
+    if rec and rec[1] and now < rec[1]:
+        return True, int(rec[1]-now)
+    return False, 0
+
+def _register_failed_login(username):
+    now = datetime.now().timestamp()
+    key = _login_key(username)
+    count, locked_until = _login_attempts.get(key, (0, 0))
+    count += 1
+    locked_until = now + LOGIN_LOCKOUT_SECONDS if count >= LOGIN_MAX_ATTEMPTS else 0
+    _login_attempts[key] = (count, locked_until)
+
+def _clear_login_attempts(username):
+    _login_attempts.pop(_login_key(username), None)
+
+
+# ---------- PAROL MUSTAHKAMLIGI ----------
+def _weak_password(pw):
+    """True qaytaradi agar parol zaif bo'lsa: kamida 8 belgi, kamida bitta harf va bitta raqam kerak."""
+    if not pw or len(pw) < 8:
+        return True
+    has_letter = any(ch.isalpha() for ch in pw)
+    has_digit = any(ch.isdigit() for ch in pw)
+    return not (has_letter and has_digit)
+
+
+# ---------- AVTOMATIK KUNLIK ZAXIRA ----------
+def _auto_backup_if_needed():
+    try:
+        backup_dir = os.path.join(_APP_DIR, 'backups')
+        os.makedirs(backup_dir, exist_ok=True)
+        today = date.today().isoformat()
+        marker = os.path.join(backup_dir, f".last_backup_{today}")
+        if os.path.exists(marker):
+            return
+        if not os.path.exists(DB_NAME):
+            return
+        import shutil
+        dest = os.path.join(backup_dir, f"pharm_mebel_backup_{today}.db")
+        shutil.copyfile(DB_NAME, dest)
+        with open(marker, 'w') as f:
+            f.write('1')
+        # Oxirgi 30 kunlik zaxiradan ortig'ini o'chirib, joy tejash
+        old_backups = sorted(
+            [f for f in os.listdir(backup_dir) if f.startswith('pharm_mebel_backup_') and f.endswith('.db')]
+        )
+        for old in old_backups[:-30]:
+            try:
+                os.remove(os.path.join(backup_dir, old))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 @app.before_request
 def require_login():
+    _auto_backup_if_needed()
     public_endpoints = {
         "login", "static", "public_track", "order_qr",
         "worker_register", "worker_verify", "worker_login", "worker_logout", "driver_login", "driver_logout", "driver_register"
     }
+    # CSRF tekshiruvi: barcha oddiy HTML-forma orqali yuboriladigan POST so'rovlar uchun.
+    # /api/ yo'nalishlari brauzerdagi JS orqali (fetch, o'sha domendan) chaqiriladi, shuning
+    # uchun bu yerda tekshirilmaydi.
+    if request.method == 'POST' and not request.path.startswith('/api/'):
+        if not _csrf_valid():
+            return "Xato: sessiya muddati tugagan yoki noto'g'ri so'rov (CSRF). Sahifani qayta yuklab, qayta urinib ko'ring.", 400
     if request.endpoint in public_endpoints or request.path.startswith('/ishchi/public/'):
         return None
     if request.path.startswith('/ishchi/'):
@@ -932,11 +1073,19 @@ def login():
     if request.method=='POST':
         user=request.form.get('user','')
         password=request.form.get('password','')
-        if user==os.environ.get('PHARM_ERP_USER','admin') and password==os.environ.get('PHARM_ERP_PASSWORD','12345'):
+        locked, wait_sec = _is_login_locked(user)
+        if locked:
+            error=f'Juda ko‘p xato urinish. {wait_sec} soniyadan so‘ng qayta urinib ko‘ring.'
+        elif user==os.environ.get('PHARM_ERP_USER','admin') and password==_ADMIN_PASSWORD:
+            _clear_login_attempts(user)
             session['logged_in']=True
             session['user']=user
+            log_action('admin_login', f'user={user}')
             return redirect(url_for('home'))
-        error='Login yoki parol xato'
+        else:
+            _register_failed_login(user)
+            log_action('admin_login_failed', f'user={user}')
+            error='Login yoki parol xato'
     return render_template_string(LOGIN_HTML,error=error)
 
 
@@ -1615,6 +1764,7 @@ def contract_pdf_download():
 def backup_db():
     if not os.path.exists(DB_NAME):
         return jsonify({"message":"Baza topilmadi"}),404
+    log_action('backup_downloaded', f'user={session.get("user","")}')
     return send_file(DB_NAME, as_attachment=True, download_name=f"pharm_mebel_backup_{date.today().isoformat()}.db")
 
 @app.route("/api/audit")
@@ -1765,7 +1915,7 @@ def worker_register():
                 c.commit(); c.close()
                 session['worker_pending_phone']=phone
                 # Haqiqiy SMS provayder ulanmaguncha kod admin panelida ko‘rinadi.
-                if os.environ.get('DEV_SHOW_OTP','1')=='1':
+                if os.environ.get('DEV_SHOW_OTP','0')=='1':
                     demo_code=code
                 msg='Tasdiqlash kodi yaratildi. Kodni kiriting.'
     return render_template_string(WORKER_REGISTER_HTML,msg=msg,error=error,demo_code=demo_code)
@@ -1783,8 +1933,10 @@ def worker_verify():
         password=request.form.get('password','')
         ism=request.form.get('ism','').strip()
         familiya=request.form.get('familiya','').strip()
-        if len(login)<3 or len(password)<6 or not ism:
-            error='Ism, kamida 3 belgili login va 6 belgili parol kiriting.'
+        if len(login)<3 or not ism:
+            error='Ism va kamida 3 belgili login kiriting.'
+        elif _weak_password(password):
+            error='Parol kamida 8 belgidan iborat bo‘lib, harf va raqamni birga o‘z ichiga olishi kerak.'
         else:
             c=get_db()
             row=c.execute('SELECT * FROM ishchi_otp WHERE telefon=? AND ishlatildi=0 ORDER BY id DESC LIMIT 1',(phone,)).fetchone()
@@ -1817,14 +1969,21 @@ def worker_login():
     if request.method=='POST':
         login=request.form.get('login','').strip()
         password=request.form.get('password','')
-        c=get_db(); row=c.execute('SELECT * FROM ishchi_akkauntlari WHERE login=? AND faol=1',(login,)).fetchone(); c.close()
-        if not row or not check_password_hash(row['parol_hash'],password):
-            error='Login yoki parol xato.'
-        elif not row['admin_tasdiq']:
-            error='Admin hali akkauntingizni tasdiqlamagan.'
+        locked, wait_sec = _is_login_locked('w:'+login)
+        if locked:
+            error=f'Juda ko‘p xato urinish. {wait_sec} soniyadan so‘ng qayta urinib ko‘ring.'
         else:
-            session.clear(); session['worker_account_id']=row['id']; session['worker_id']=row['ishchi_id']
-            return redirect(url_for('worker_dashboard'))
+            c=get_db(); row=c.execute('SELECT * FROM ishchi_akkauntlari WHERE login=? AND faol=1',(login,)).fetchone(); c.close()
+            if not row or not check_password_hash(row['parol_hash'],password):
+                _register_failed_login('w:'+login)
+                error='Login yoki parol xato.'
+            elif not row['admin_tasdiq']:
+                error='Admin hali akkauntingizni tasdiqlamagan.'
+            else:
+                _clear_login_attempts('w:'+login)
+                session.clear(); session['worker_account_id']=row['id']; session['worker_id']=row['ishchi_id']
+                log_action('worker_login', f'login={login}')
+                return redirect(url_for('worker_dashboard'))
     return render_template_string(WORKER_LOGIN_HTML,error=error)
 
 
@@ -1893,9 +2052,9 @@ def worker_admin():
     if request.method=='POST':
         action=request.form.get('action')
         if action=='approve':
-            aid=int(request.form['account_id']); c.execute('UPDATE ishchi_akkauntlari SET admin_tasdiq=1 WHERE id=?',(aid,))
+            aid=int(request.form['account_id']); c.execute('UPDATE ishchi_akkauntlari SET admin_tasdiq=1 WHERE id=?',(aid,)); log_action('worker_approved', f'account_id={aid}')
         elif action=='block':
-            aid=int(request.form['account_id']); c.execute('UPDATE ishchi_akkauntlari SET faol=0 WHERE id=?',(aid,))
+            aid=int(request.form['account_id']); c.execute('UPDATE ishchi_akkauntlari SET faol=0 WHERE id=?',(aid,)); log_action('worker_blocked', f'account_id={aid}')
         elif action=='task':
             c.execute('''INSERT INTO ishchi_topshiriqlari(ishchi_id,buyurtma_kodi,ish_turi,tavsif,holat,progress,sana,tugash_sana)
                          VALUES(?,?,?,?,?,?,?,?)''',(
@@ -1935,8 +2094,10 @@ def driver_register():
         telefon=normalize_phone(request.form.get('telefon',''))
         login=request.form.get('login','').strip()
         password=request.form.get('password','')
-        if not ism or len(login)<3 or len(password)<6 or len(telefon)<10:
-            error='Ism, telefon, kamida 3 belgili login va 6 belgili parol kiriting.'
+        if not ism or len(login)<3 or len(telefon)<10:
+            error='Ism, telefon va kamida 3 belgili login kiriting.'
+        elif _weak_password(password):
+            error='Parol kamida 8 belgidan iborat bo‘lib, harf va raqamni birga o‘z ichiga olishi kerak.'
         else:
             c=get_db()
             if c.execute("SELECT 1 FROM shofyor_akkauntlari WHERE login=?",(login,)).fetchone():
@@ -1965,18 +2126,25 @@ def driver_login():
     if request.method=='POST':
         login=request.form.get('login','').strip()
         password=request.form.get('password','')
-        c=get_db()
-        row=c.execute("SELECT a.*,i.ism,i.familiya FROM shofyor_akkauntlari a JOIN ishchilar i ON i.id=a.ishchi_id WHERE a.login=? AND a.faol=1",(login,)).fetchone()
-        c.close()
-        if not row or not check_password_hash(row['parol_hash'],password):
-            error='Login yoki parol xato.'
-        elif not row['admin_tasdiq']:
-            error='Rahbar hali akkauntingizni tasdiqlamagan.'
+        locked, wait_sec = _is_login_locked('d:'+login)
+        if locked:
+            error=f'Juda ko‘p xato urinish. {wait_sec} soniyadan so‘ng qayta urinib ko‘ring.'
         else:
-            session.clear()
-            session['driver_account_id']=row['id']
-            session['driver_id']=row['ishchi_id']
-            return redirect(url_for('driver_dashboard'))
+            c=get_db()
+            row=c.execute("SELECT a.*,i.ism,i.familiya FROM shofyor_akkauntlari a JOIN ishchilar i ON i.id=a.ishchi_id WHERE a.login=? AND a.faol=1",(login,)).fetchone()
+            c.close()
+            if not row or not check_password_hash(row['parol_hash'],password):
+                _register_failed_login('d:'+login)
+                error='Login yoki parol xato.'
+            elif not row['admin_tasdiq']:
+                error='Rahbar hali akkauntingizni tasdiqlamagan.'
+            else:
+                _clear_login_attempts('d:'+login)
+                session.clear()
+                session['driver_account_id']=row['id']
+                session['driver_id']=row['ishchi_id']
+                log_action('driver_login', f'login={login}')
+                return redirect(url_for('driver_dashboard'))
     return render_template_string(DRIVER_LOGIN_HTML,error=error)
 
 @app.route('/shofyor/logout')
@@ -2028,22 +2196,29 @@ def driver_admin():
                 wid=int(request.form['ishchi_id'])
                 login=request.form.get('login','').strip()
                 password=request.form.get('password','')
-                existing=c.execute("SELECT id FROM shofyor_akkauntlari WHERE ishchi_id=?",(wid,)).fetchone()
-                if existing:
-                    c.execute("UPDATE shofyor_akkauntlari SET login=?,parol_hash=?,faol=1,admin_tasdiq=1 WHERE ishchi_id=?",(login,generate_password_hash(password),wid))
+                if _weak_password(password):
+                    msg='Xato: parol kamida 8 belgidan iborat bo‘lib, harf va raqamni birga o‘z ichiga olishi kerak.'
                 else:
-                    c.execute("INSERT INTO shofyor_akkauntlari(ishchi_id,login,parol_hash,faol,admin_tasdiq) VALUES(?,?,?,1,1)",(wid,login,generate_password_hash(password)))
-                msg='Shofyor akkaunti saqlandi.'
+                    existing=c.execute("SELECT id FROM shofyor_akkauntlari WHERE ishchi_id=?",(wid,)).fetchone()
+                    if existing:
+                        c.execute("UPDATE shofyor_akkauntlari SET login=?,parol_hash=?,faol=1,admin_tasdiq=1 WHERE ishchi_id=?",(login,generate_password_hash(password),wid))
+                    else:
+                        c.execute("INSERT INTO shofyor_akkauntlari(ishchi_id,login,parol_hash,faol,admin_tasdiq) VALUES(?,?,?,1,1)",(wid,login,generate_password_hash(password)))
+                    msg='Shofyor akkaunti saqlandi.'
+                    log_action('driver_account_set', f'ishchi_id={wid},login={login}')
             elif action=='approve_driver':
                 aid=int(request.form['account_id'])
                 c.execute("UPDATE shofyor_akkauntlari SET admin_tasdiq=1,faol=1 WHERE id=?",(aid,))
+                log_action('driver_approved', f'account_id={aid}')
                 msg='Shofyor tasdiqlandi.'
             elif action=='block_driver':
                 aid=int(request.form['account_id'])
                 c.execute("UPDATE shofyor_akkauntlari SET faol=0 WHERE id=?",(aid,))
+                log_action('driver_blocked', f'account_id={aid}')
                 msg='Shofyor bloklandi.'
             elif action=='delivery':
                 c.execute("INSERT INTO yetkazishlar(buyurtma_id,haydovchi_id,sana,qadoq_soni,navbat,izoh) VALUES(?,?,?,?,?,?)",(int(request.form['buyurtma_id']),int(request.form['shofyor_id']),date.today().isoformat(),int(request.form.get('qadoq_soni') or 1),int(request.form.get('navbat') or 1),request.form.get('izoh','')))
+                log_action('delivery_assigned', f"buyurtma_id={request.form['buyurtma_id']},shofyor_id={request.form['shofyor_id']}")
                 msg='Yetkazish shofyorga biriktirildi.'
             c.commit()
         except Exception as e:
@@ -2077,7 +2252,7 @@ def pro_admin_page():
 
 LOGIN_HTML = r"""
 <!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Mebel360 - Kirish</title><style>body{margin:0;background:linear-gradient(135deg,#0f1b33,#2563eb);font-family:Arial;display:grid;place-items:center;min-height:100vh}.box{background:#fff;padding:28px;border-radius:18px;width:min(360px,92%);box-shadow:0 20px 50px #0005}h2{margin-top:0}input{width:100%;padding:12px;margin:8px 0;border:1px solid #cbd5e1;border-radius:9px;box-sizing:border-box}button{width:100%;padding:12px;border:0;border-radius:9px;background:#2563eb;color:#fff;font-weight:700}.err{color:#b91c1c;font-size:13px}</style></head><body><form class="box" method="post"><h2>🏭 Mebel360</h2><input name="user" placeholder="Login" value="admin"><input name="password" type="password" placeholder="Parol"><button>Kirish</button><div class="err">{{error}}</div><p style="font-size:12px;color:#64748b">Standart: admin / 12345</p><hr><p style="text-align:center"><a href="/ishchi/login">👷 Ishchi kirishi</a> · <a href="/ishchi/royxat">Ro‘yxatdan o‘tish</a><br><a href="/shofyor/login">🚚 Shofyor kirishi</a> · <a href="/shofyor/royxat">Ro‘yxatdan o‘tish</a></p></form></body></html>
+<title>Mebel360 - Kirish</title><style>body{margin:0;background:linear-gradient(135deg,#0f1b33,#2563eb);font-family:Arial;display:grid;place-items:center;min-height:100vh}.box{background:#fff;padding:28px;border-radius:18px;width:min(360px,92%);box-shadow:0 20px 50px #0005}h2{margin-top:0}input{width:100%;padding:12px;margin:8px 0;border:1px solid #cbd5e1;border-radius:9px;box-sizing:border-box}button{width:100%;padding:12px;border:0;border-radius:9px;background:#2563eb;color:#fff;font-weight:700}.err{color:#b91c1c;font-size:13px}</style></head><body><form class="box" method="post"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><h2>🏭 Mebel360</h2><input name="user" placeholder="Login" value="admin"><input name="password" type="password" placeholder="Parol"><button>Kirish</button><div class="err">{{error}}</div><p style="font-size:12px;color:#64748b">Parolni bilmasangiz, papkadagi <b>admin_parol.txt</b> faylini oching yoki konsol oynasidagi (CMD) chiqishga qarang.</p><hr><p style="text-align:center"><a href="/ishchi/login">👷 Ishchi kirishi</a> · <a href="/ishchi/royxat">Ro‘yxatdan o‘tish</a><br><a href="/shofyor/login">🚚 Shofyor kirishi</a> · <a href="/shofyor/royxat">Ro‘yxatdan o‘tish</a></p></form></body></html>
 """
 
 WORKER_BASE_STYLE = """
@@ -2086,9 +2261,9 @@ WORKER_BASE_STYLE = """
 </style>
 """
 
-DRIVER_REGISTER_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shofyor ro‘yxatdan o‘tishi</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>🚚 Shofyor ro‘yxatdan o‘tishi</b></div><div class="wrap"><form class="box" method="post"><h2>Yangi akkaunt</h2><label>Ism</label><input name="ism" required><label>Familiya</label><input name="familiya"><label>Telefon</label><input name="telefon" placeholder="+998901234567" required><label>Login</label><input name="login" required><label>Parol</label><input name="password" type="password" minlength="6" required><button>Ro‘yxatdan o‘tish</button><p class="ok">{{msg}}</p><p class="err">{{error}}</p><p><a href="/shofyor/login">Akkauntim bor — kirish</a></p></form></div></body></html>"""
+DRIVER_REGISTER_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shofyor ro‘yxatdan o‘tishi</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>🚚 Shofyor ro‘yxatdan o‘tishi</b></div><div class="wrap"><form class="box" method="post"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><h2>Yangi akkaunt</h2><label>Ism</label><input name="ism" required><label>Familiya</label><input name="familiya"><label>Telefon</label><input name="telefon" placeholder="+998901234567" required><label>Login</label><input name="login" required><label>Parol</label><input name="password" type="password" minlength="8" required><button>Ro‘yxatdan o‘tish</button><p class="ok">{{msg}}</p><p class="err">{{error}}</p><p><a href="/shofyor/login">Akkauntim bor — kirish</a></p></form></div></body></html>"""
 
-DRIVER_LOGIN_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shofyor kirishi</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>🚚 Mebel360 — Shofyor kabineti</b></div><div class="wrap"><form class="box" method="post"><h2>Kirish</h2><input name="login" placeholder="Login" required><input name="password" type="password" placeholder="Parol" required><button>Kirish</button><p class="err">{{error}}</p><p><a href="/shofyor/royxat">Yangi shofyor — ro‘yxatdan o‘tish</a></p><p><a href="/login">Rahbar kirishi</a></p></form></div></body></html>"""
+DRIVER_LOGIN_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shofyor kirishi</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>🚚 Mebel360 — Shofyor kabineti</b></div><div class="wrap"><form class="box" method="post"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><h2>Kirish</h2><input name="login" placeholder="Login" required><input name="password" type="password" placeholder="Parol" required><button>Kirish</button><p class="err">{{error}}</p><p><a href="/shofyor/royxat">Yangi shofyor — ro‘yxatdan o‘tish</a></p><p><a href="/login">Rahbar kirishi</a></p></form></div></body></html>"""
 
 DRIVER_DASHBOARD_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shofyor kabineti</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><div class="wrap" style="padding:0"><b>🚚 {{driver['ism']}} {{driver['familiya']}}</b><a class="btn red" style="float:right" href="/shofyor/logout">Chiqish</a></div></div><div class="wrap"><h2>Menga biriktirilgan yuklar</h2>{% for x in deliveries %}<a href="/shofyor/yetkazish/{{x['id']}}" style="text-decoration:none;color:inherit"><div class="card task"><div style="display:flex;justify-content:space-between;gap:10px"><div><b style="font-size:21px">{{x['kod']}}</b><p>{{x['mahsulot']}}</p><p class="muted">{{x['manzil']}} · {{x['qavat'] or '-'}}-qavat · Lift: {{x['lift'] or '-'}}</p></div><div><span class="btn {% if x['holat']=='Yetkazib berildi' %}green{% endif %}">{{x['holat']}}</span></div></div></div></a>{% else %}<div class="card">Hozircha yuk biriktirilmagan.</div>{% endfor %}</div></body></html>"""
 
@@ -2100,30 +2275,30 @@ DRIVER_DETAIL_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf
 <a class="btn green" href="https://www.google.com/maps/search/?api=1&query={{x['lokatsiya']|urlencode}}" target="_blank">Google Maps</a>
 <a class="btn" style="background:#ef4444" href="https://yandex.com/maps/?text={{x['lokatsiya']|urlencode}}" target="_blank">Yandex Maps</a>
 </div></div>
-{% endif %}</div><div class="card"><h3>Holat: {{x['holat']}}</h3><form method="post" action="/shofyor/yetkazish/{{x['id']}}/holat"><button name="action" value="yolga">🚚 Yo‘lga chiqdim</button><button name="action" value="yetib" class="green">📍 Yetib keldim</button><button name="action" value="yetkazildi" style="background:#7c3aed">✅ Yetkazib berdim</button></form><p class="muted">Yo‘lga chiqdi: {{x['yolga_chiqdi'] or '-'}}</p><p class="muted">Yetib keldi: {{x['yetib_keldi'] or '-'}}</p><p class="muted">Yetkazildi: {{x['yetkazildi'] or '-'}}</p></div></div></body></html>"""
+{% endif %}</div><div class="card"><h3>Holat: {{x['holat']}}</h3><form method="post" action="/shofyor/yetkazish/{{x['id']}}/holat"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><button name="action" value="yolga">🚚 Yo‘lga chiqdim</button><button name="action" value="yetib" class="green">📍 Yetib keldim</button><button name="action" value="yetkazildi" style="background:#7c3aed">✅ Yetkazib berdim</button></form><p class="muted">Yo‘lga chiqdi: {{x['yolga_chiqdi'] or '-'}}</p><p class="muted">Yetib keldi: {{x['yetib_keldi'] or '-'}}</p><p class="muted">Yetkazildi: {{x['yetkazildi'] or '-'}}</p></div></div></body></html>"""
 
-DRIVER_ADMIN_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shofyor boshqaruvi</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>🚚 Shofyor boshqaruvi</b><a class="btn" style="float:right" href="/">ERP bosh sahifa</a></div><div class="wrap"><p class="ok">{{msg}}</p><div class="grid"><form class="box" method="post"><h3>Shofyor login yaratish</h3><input type="hidden" name="action" value="account"><label>Shofyor</label><select name="ishchi_id" required>{% for d in drivers %}<option value="{{d['id']}}">{{d['ism']}} {{d['familiya']}}</option>{% endfor %}</select><label>Login</label><input name="login" required><label>Parol</label><input name="password" type="password" minlength="6" required><button>Akkaunt yaratish</button></form><form class="box" method="post"><h3>Yuk biriktirish</h3><input type="hidden" name="action" value="delivery"><label>Buyurtma</label><select name="buyurtma_id" required>{% for o in orders %}<option value="{{o['id']}}">{{o['kod']}} — {{o['mahsulot']}}</option>{% endfor %}</select><label>Shofyor</label><select name="shofyor_id" required>{% for d in drivers %}<option value="{{d['id']}}">{{d['ism']}} {{d['familiya']}}</option>{% endfor %}</select><label>Qadoq soni</label><input type="number" name="qadoq_soni" value="1" min="1"><label>Yetkazish navbati</label><input type="number" name="navbat" value="1" min="1"><label>Izoh</label><textarea name="izoh"></textarea><button>Biriktirish</button></form></div><div class="box" style="overflow:auto"><h3>Shofyor akkauntlari</h3><table><tr><th>Shofyor</th><th>Telefon</th><th>Login</th><th>Holat</th><th>Amal</th></tr>{% for a in driver_accounts %}<tr><td>{{a['ism']}} {{a['familiya']}}</td><td>{{a['telefon'] or '-'}}</td><td>{{a['login']}}</td><td>{% if a['admin_tasdiq'] %}✅ Tasdiqlangan{% else %}⏳ Kutilmoqda{% endif %}</td><td>{% if not a['admin_tasdiq'] %}<form method="post" style="display:inline"><input type="hidden" name="action" value="approve_driver"><input type="hidden" name="account_id" value="{{a['id']}}"><button class="green">Tasdiqlash</button></form>{% endif %}<form method="post" style="display:inline"><input type="hidden" name="action" value="block_driver"><input type="hidden" name="account_id" value="{{a['id']}}"><button class="red">Bloklash</button></form></td></tr>{% endfor %}</table></div><div class="box" style="overflow:auto"><h3>Biriktirilgan yuklar</h3><table><tr><th>Buyurtma</th><th>Mahsulot</th><th>Shofyor</th><th>Qadoq</th><th>Holat</th></tr>{% for a in assigned %}<tr><td>{{a['kod']}}</td><td>{{a['mahsulot']}}</td><td>{{a['ism']}} {{a['familiya']}}</td><td>{{a['qadoq_soni']}}</td><td>{{a['holat']}}</td></tr>{% endfor %}</table></div></div></body></html>"""
+DRIVER_ADMIN_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shofyor boshqaruvi</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>🚚 Shofyor boshqaruvi</b><a class="btn" style="float:right" href="/">ERP bosh sahifa</a></div><div class="wrap"><p class="ok">{{msg}}</p><div class="grid"><form class="box" method="post"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><h3>Shofyor login yaratish</h3><input type="hidden" name="action" value="account"><label>Shofyor</label><select name="ishchi_id" required>{% for d in drivers %}<option value="{{d['id']}}">{{d['ism']}} {{d['familiya']}}</option>{% endfor %}</select><label>Login</label><input name="login" required><label>Parol</label><input name="password" type="password" minlength="8" required><button>Akkaunt yaratish</button></form><form class="box" method="post"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><h3>Yuk biriktirish</h3><input type="hidden" name="action" value="delivery"><label>Buyurtma</label><select name="buyurtma_id" required>{% for o in orders %}<option value="{{o['id']}}">{{o['kod']}} — {{o['mahsulot']}}</option>{% endfor %}</select><label>Shofyor</label><select name="shofyor_id" required>{% for d in drivers %}<option value="{{d['id']}}">{{d['ism']}} {{d['familiya']}}</option>{% endfor %}</select><label>Qadoq soni</label><input type="number" name="qadoq_soni" value="1" min="1"><label>Yetkazish navbati</label><input type="number" name="navbat" value="1" min="1"><label>Izoh</label><textarea name="izoh"></textarea><button>Biriktirish</button></form></div><div class="box" style="overflow:auto"><h3>Shofyor akkauntlari</h3><table><tr><th>Shofyor</th><th>Telefon</th><th>Login</th><th>Holat</th><th>Amal</th></tr>{% for a in driver_accounts %}<tr><td>{{a['ism']}} {{a['familiya']}}</td><td>{{a['telefon'] or '-'}}</td><td>{{a['login']}}</td><td>{% if a['admin_tasdiq'] %}✅ Tasdiqlangan{% else %}⏳ Kutilmoqda{% endif %}</td><td>{% if not a['admin_tasdiq'] %}<form method="post" style="display:inline"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><input type="hidden" name="action" value="approve_driver"><input type="hidden" name="account_id" value="{{a['id']}}"><button class="green">Tasdiqlash</button></form>{% endif %}<form method="post" style="display:inline"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><input type="hidden" name="action" value="block_driver"><input type="hidden" name="account_id" value="{{a['id']}}"><button class="red">Bloklash</button></form></td></tr>{% endfor %}</table></div><div class="box" style="overflow:auto"><h3>Biriktirilgan yuklar</h3><table><tr><th>Buyurtma</th><th>Mahsulot</th><th>Shofyor</th><th>Qadoq</th><th>Holat</th></tr>{% for a in assigned %}<tr><td>{{a['kod']}}</td><td>{{a['mahsulot']}}</td><td>{{a['ism']}} {{a['familiya']}}</td><td>{{a['qadoq_soni']}}</td><td>{{a['holat']}}</td></tr>{% endfor %}</table></div></div></body></html>"""
 
 
-WORKER_REGISTER_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ishchi ro‘yxati</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>👷 Ishchi ro‘yxatdan o‘tishi</b></div><div class="wrap"><form class="box" method="post"><h2>Telefon raqamingiz</h2><p class="muted">Masalan: +998 90 123 45 67</p><input name="telefon" required placeholder="+998901234567"><button>Kod olish</button><p class="ok">{{msg}}</p><p class="err">{{error}}</p>{% if demo_code %}<div class="card"><b>Sinov kodi: {{demo_code}}</b><p class="muted">Haqiqiy SMS xizmati ulanmaguncha shu koddan foydalaning.</p><a class="btn green" href="/ishchi/kod">Kodni kiritish</a></div>{% endif %}<p><a href="/ishchi/login">Akkauntim bor — kirish</a></p></form></div></body></html>"""
+WORKER_REGISTER_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ishchi ro‘yxati</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>👷 Ishchi ro‘yxatdan o‘tishi</b></div><div class="wrap"><form class="box" method="post"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><h2>Telefon raqamingiz</h2><p class="muted">Masalan: +998 90 123 45 67</p><input name="telefon" required placeholder="+998901234567"><button>Kod olish</button><p class="ok">{{msg}}</p><p class="err">{{error}}</p>{% if demo_code %}<div class="card"><b>Sinov kodi: {{demo_code}}</b><p class="muted">Haqiqiy SMS xizmati ulanmaguncha shu koddan foydalaning.</p><a class="btn green" href="/ishchi/kod">Kodni kiritish</a></div>{% endif %}<p><a href="/ishchi/login">Akkauntim bor — kirish</a></p></form></div></body></html>"""
 
-WORKER_VERIFY_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kodni tasdiqlash</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>🔐 Telefonni tasdiqlash</b></div><div class="wrap"><form class="box" method="post"><p>{{telefon}}</p><label>Kod</label><input name="kod" inputmode="numeric" maxlength="6" required><label>Ism</label><input name="ism" required><label>Familiya</label><input name="familiya"><label>Yangi login</label><input name="login" required><label>Yangi parol</label><input name="password" type="password" minlength="6" required><button>Ro‘yxatdan o‘tish</button><p class="err">{{error}}</p></form></div></body></html>"""
+WORKER_VERIFY_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kodni tasdiqlash</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>🔐 Telefonni tasdiqlash</b></div><div class="wrap"><form class="box" method="post"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><p>{{telefon}}</p><label>Kod</label><input name="kod" inputmode="numeric" maxlength="6" required><label>Ism</label><input name="ism" required><label>Familiya</label><input name="familiya"><label>Yangi login</label><input name="login" required><label>Yangi parol</label><input name="password" type="password" minlength="8" required><button>Ro‘yxatdan o‘tish</button><p class="err">{{error}}</p></form></div></body></html>"""
 
 WORKER_WAIT_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kutilmoqda</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="wrap"><div class="box"><h2>✅ Ro‘yxatdan o‘tdingiz</h2><p>Endi administrator akkauntingizni tasdiqlaydi. Tasdiqlangach login va parolingiz bilan kirasiz.</p><a class="btn" href="/ishchi/login">Kirish sahifasi</a></div></div></body></html>"""
 
-WORKER_LOGIN_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ishchi kirishi</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>🏭 Mebel360 — Ishchi kabineti</b></div><div class="wrap"><form class="box" method="post"><h2>Kirish</h2><input name="login" placeholder="Login" required><input name="password" type="password" placeholder="Parol" required><button>Kirish</button><p class="err">{{error}}</p><p><a href="/ishchi/royxat">Yangi ro‘yxatdan o‘tish</a></p></form></div></body></html>"""
+WORKER_LOGIN_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ishchi kirishi</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>🏭 Mebel360 — Ishchi kabineti</b></div><div class="wrap"><form class="box" method="post"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><h2>Kirish</h2><input name="login" placeholder="Login" required><input name="password" type="password" placeholder="Parol" required><button>Kirish</button><p class="err">{{error}}</p><p><a href="/ishchi/royxat">Yangi ro‘yxatdan o‘tish</a></p></form></div></body></html>"""
 
 WORKER_DASHBOARD_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ishchi kabineti</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><div class="wrap" style="padding:0"><b>👷 {{worker['ism']}} {{worker['familiya']}}</b> — {{worker['lavozim']}} <a class="btn red" style="float:right" href="/ishchi/logout">Chiqish</a></div></div><div class="wrap">
 {% with messages = get_flashed_messages() %}{% if messages %}<div class="card err">{{messages[0]}}</div>{% endif %}{% endwith %}
 <div class="grid"><div class="card stat"><span>HOZIRGI HOLAT</span><br><b style="color:{% if worker_state=='Ishlayapti' %}#16a34a{% else %}#64748b{% endif %}">{{worker_state}}</b></div><div class="card stat"><span>ISHLAGAN KUN</span><br><b>{{stats['kun'] or 0}}</b></div><div class="card stat"><span>JAMI SOAT</span><br><b>{{'%.1f'|format(stats['soat'] or 0)}}</b></div></div>
 {% if active_task %}<div class="card" style="border-left:7px solid #16a34a"><h3>🟢 Hozir ishlayotgan ishim</h3><p><b>{{active_task['ish_turi']}}</b> — {{active_task['buyurtma_kodi'] or 'Buyurtmasiz'}}</p><p>{{active_task['tavsif']}}</p><p>Boshlangan vaqt: <b>{{active_task['boshlandi_vaqt']}}</b></p></div>{% endif %}
 <h2>Topshiriqlarim</h2>{% for t in tasks %}<div class="card task"><b>{{t['ish_turi']}}</b> {% if t['buyurtma_kodi'] %}<span class="muted">— {{t['buyurtma_kodi']}}</span>{% endif %}<p>{{t['tavsif']}}</p><div class="bar"><i style="width:{{t['progress']}}%"></i></div><p><b>{{t['progress']}}%</b> · {{t['holat']}} · Reja: {{t['sana']}}{% if t['tugash_sana'] %} — {{t['tugash_sana']}}{% endif %}</p><p class="muted">Boshladi: {{t['boshlandi_vaqt'] or '-'}} · Tugatdi: {{t['tugadi_vaqt'] or '-'}}</p>
-{% if t['holat']=='Yangi' or t['holat']=='Jarayonda' %}<form method="post" action="/ishchi/topshiriq/{{t['id']}}/boshlash"><button class="green">▶ Ishni boshladim</button></form>{% elif t['holat']=='Ishlayapti' %}<form method="post" action="/ishchi/topshiriq/{{t['id']}}/tugatish"><button style="background:#7c3aed">✅ Ishni tugatdim</button></form>{% endif %}
-{% if t['holat']!='Tayyor' %}<form method="post" action="/ishchi/topshiriq/{{t['id']}}"><input type="hidden" name="holat" value="{{t['holat']}}"><label>Jarayon foizi</label><input type="number" name="progress" min="0" max="100" value="{{t['progress']}}"><button>Foizni yangilash</button></form>{% endif %}</div>{% else %}<div class="card">Hozircha topshiriq yo‘q. Holatingiz: <b>Bo‘sh</b>.</div>{% endfor %}</div></body></html>"""
+{% if t['holat']=='Yangi' or t['holat']=='Jarayonda' %}<form method="post" action="/ishchi/topshiriq/{{t['id']}}/boshlash"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><button class="green">▶ Ishni boshladim</button></form>{% elif t['holat']=='Ishlayapti' %}<form method="post" action="/ishchi/topshiriq/{{t['id']}}/tugatish"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><button style="background:#7c3aed">✅ Ishni tugatdim</button></form>{% endif %}
+{% if t['holat']!='Tayyor' %}<form method="post" action="/ishchi/topshiriq/{{t['id']}}"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><input type="hidden" name="holat" value="{{t['holat']}}"><label>Jarayon foizi</label><input type="number" name="progress" min="0" max="100" value="{{t['progress']}}"><button>Foizni yangilash</button></form>{% endif %}</div>{% else %}<div class="card">Hozircha topshiriq yo‘q. Holatingiz: <b>Bo‘sh</b>.</div>{% endfor %}</div></body></html>"""
 
 WORKER_ADMIN_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ishchi boshqaruvi</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>👥 Ishchi kabinetlarini boshqarish</b> <a class="btn" style="float:right" href="/">ERP bosh sahifa</a></div><div class="wrap">
 <div class="box" style="overflow:auto"><h3>Ishchilarning hozirgi holati</h3><table><tr><th>Ishchi</th><th>Holat</th><th>Buyurtma</th><th>Ish turi</th><th>Boshlagan vaqt</th></tr>{% for w in worker_states %}<tr><td>{{w['ism']}} {{w['familiya']}}</td><td>{% if w['ish_holati']=='Ishlayapti' %}<b style="color:#16a34a">🟢 Ishlayapti</b>{% else %}<b style="color:#64748b">⚪ Bo‘sh</b>{% endif %}</td><td>{{w['buyurtma_kodi'] or '-'}}</td><td>{{w['ish_turi'] or '-'}}</td><td>{{w['boshlandi_vaqt'] or '-'}}</td></tr>{% endfor %}</table></div>
-<div class="grid"><form class="box" method="post"><h3>Yangi topshiriq</h3><input type="hidden" name="action" value="task"><label>Ishchi</label><select name="ishchi_id" required>{% for w in workers %}<option value="{{w['id']}}">{{w['ism']}} {{w['familiya']}} — {{w['lavozim']}}</option>{% endfor %}</select><label>Buyurtma kodi</label><input name="buyurtma_kodi" placeholder="AB 007"><label>Ish turi</label><input name="ish_turi" required placeholder="Kesish / Rover / Yig‘ish"><label>Topshiriq</label><textarea name="tavsif" placeholder="Nima ish qilishi kerakligini batafsil yozing"></textarea><label>Boshlanish rejasi</label><input type="date" name="sana" value="{{today}}"><label>Tugash rejasi</label><input type="date" name="tugash_sana"><button>Topshiriq berish</button></form><div class="box" style="grid-column:span 2;overflow:auto"><h3>Ro‘yxatdan o‘tganlar</h3><table><tr><th>Ishchi</th><th>Telefon</th><th>Login</th><th>Holat</th><th>Amal</th></tr>{% for a in accounts %}<tr><td>{{a['ism']}} {{a['familiya']}}</td><td>{{a['telefon']}}</td><td>{{a['login'] or ''}}</td><td>{% if a['admin_tasdiq'] %}✅ Tasdiqlangan{% else %}⏳ Kutilmoqda{% endif %}</td><td>{% if not a['admin_tasdiq'] %}<form method="post" style="display:inline"><input type="hidden" name="action" value="approve"><input type="hidden" name="account_id" value="{{a['id']}}"><button class="green">Tasdiqlash</button></form>{% endif %}<form method="post" style="display:inline"><input type="hidden" name="action" value="block"><input type="hidden" name="account_id" value="{{a['id']}}"><button class="red">Bloklash</button></form></td></tr>{% endfor %}</table></div></div>
+<div class="grid"><form class="box" method="post"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><h3>Yangi topshiriq</h3><input type="hidden" name="action" value="task"><label>Ishchi</label><select name="ishchi_id" required>{% for w in workers %}<option value="{{w['id']}}">{{w['ism']}} {{w['familiya']}} — {{w['lavozim']}}</option>{% endfor %}</select><label>Buyurtma kodi</label><input name="buyurtma_kodi" placeholder="AB 007"><label>Ish turi</label><input name="ish_turi" required placeholder="Kesish / Rover / Yig‘ish"><label>Topshiriq</label><textarea name="tavsif" placeholder="Nima ish qilishi kerakligini batafsil yozing"></textarea><label>Boshlanish rejasi</label><input type="date" name="sana" value="{{today}}"><label>Tugash rejasi</label><input type="date" name="tugash_sana"><button>Topshiriq berish</button></form><div class="box" style="grid-column:span 2;overflow:auto"><h3>Ro‘yxatdan o‘tganlar</h3><table><tr><th>Ishchi</th><th>Telefon</th><th>Login</th><th>Holat</th><th>Amal</th></tr>{% for a in accounts %}<tr><td>{{a['ism']}} {{a['familiya']}}</td><td>{{a['telefon']}}</td><td>{{a['login'] or ''}}</td><td>{% if a['admin_tasdiq'] %}✅ Tasdiqlangan{% else %}⏳ Kutilmoqda{% endif %}</td><td>{% if not a['admin_tasdiq'] %}<form method="post" style="display:inline"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><input type="hidden" name="action" value="approve"><input type="hidden" name="account_id" value="{{a['id']}}"><button class="green">Tasdiqlash</button></form>{% endif %}<form method="post" style="display:inline"><input type=\"hidden\" name=\"csrf_token\" value=\"{{csrf_token()}}\"><input type="hidden" name="action" value="block"><input type="hidden" name="account_id" value="{{a['id']}}"><button class="red">Bloklash</button></form></td></tr>{% endfor %}</table></div></div>
 <div class="box" style="overflow:auto"><h3>Topshiriqlar tarixi</h3><table><tr><th>Ishchi</th><th>Buyurtma</th><th>Ish</th><th>Holat</th><th>Progress</th><th>Boshladi</th><th>Tugatdi</th></tr>{% for t in tasks %}<tr><td>{{t['ism']}} {{t['familiya']}}</td><td>{{t['buyurtma_kodi']}}</td><td>{{t['ish_turi']}}</td><td>{{t['holat']}}</td><td>{{t['progress']}}%</td><td>{{t['boshlandi_vaqt'] or '-'}}</td><td>{{t['tugadi_vaqt'] or '-'}}</td></tr>{% endfor %}</table></div></div></body></html>"""
 
 
@@ -2132,7 +2307,7 @@ HTML = r"""
 <html lang="uz">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Mebel360 V5.1.5</title>
+<title>Mebel360 V5.1.4</title>
 <style>
 :root{--nav:#0f1b33;--blue:#2563eb;--bg:#eef3f8;--card:#fff;--text:#182235;--muted:#64748b;--danger:#dc2626;--ok:#16a34a}
 *{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:var(--bg);color:var(--text)}
@@ -2159,7 +2334,7 @@ th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:no
 </style>
 </head>
 <body>
-<header><div class="top"><div><h1>🏭 Mebel360 V5.1.5</h1><div class="sub">Ishchilar, buyurtmalar, ombor, ishlab chiqarish va moliya</div></div><div><a href="/pro-boshqaruv"><button style="background:#0f766e">PRO boshqaruv</button></a> <a href="/shofyor-boshqaruv"><button style="background:#7c3aed">Shofyor boshqaruvi</button></a> <a href="/shartnoma-namuna"><button style="background:#0f766e">Shartnoma Word</button></a> <a href="/shartnoma-pdf" target="_blank"><button style="background:#0369a1">Shartnoma PDF</button></a> <a href="/backup"><button style="background:#16a34a">Backup</button></a> <a href="/logout"><button style="background:#dc2626">Chiqish</button></a></div></div></header>
+<header><div class="top"><div><h1>🏭 Mebel360 V5.1.4</h1><div class="sub">Ishchilar, buyurtmalar, ombor, ishlab chiqarish va moliya</div></div><div><a href="/pro-boshqaruv"><button style="background:#0f766e">PRO boshqaruv</button></a> <a href="/shofyor-boshqaruv"><button style="background:#7c3aed">Shofyor boshqaruvi</button></a> <a href="/shartnoma-namuna"><button style="background:#0f766e">Shartnoma Word</button></a> <a href="/shartnoma-pdf" target="_blank"><button style="background:#0369a1">Shartnoma PDF</button></a> <a href="/backup"><button style="background:#16a34a">Backup</button></a> <a href="/logout"><button style="background:#dc2626">Chiqish</button></a></div></div></header>
 <main class="wrap">
 <div class="cards">
  <div class="card"><span>ISHCHILAR</span><b id="dWorkers">0</b></div>
@@ -2393,44 +2568,45 @@ th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:no
 const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s);
 const today=new Date().toISOString().slice(0,10);$$('input[type=date]').forEach(x=>x.value=today);
 $$('.tabs button').forEach(b=>b.onclick=()=>{$$('.tabs button').forEach(x=>x.classList.remove('active'));$$('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#'+b.dataset.tab).classList.add('active')});
+function esc(s){return String(s===undefined||s===null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function api(u,o){const r=await fetch(u,o),j=await r.json();if(!r.ok)throw new Error(j.message||'Xato');return j}
 function fj(f){return Object.fromEntries(new FormData(f).entries())}
 function bind(id,url){const f=$(id);f.onsubmit=async e=>{e.preventDefault();const m=f.querySelector('.msg');try{await api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(fj(f))});m.textContent='✅ Saqlandi';await refresh()}catch(x){m.textContent='❌ '+x.message}}}
 function money(v){return Number(v||0).toLocaleString('uz-UZ',{maximumFractionDigits:2})}
 
-async function loadWorkers(){const a=await api('/api/ishchilar');$('#workersBody').innerHTML=a.map(x=>`<tr><td>${x.ism} ${x.familiya||''}</td><td>${x.lavozim||''}</td><td>${x.staj_yil} yil</td><td>${money(x.kunlik_stavka)}</td><td>${money(x.oylik_maosh)}</td><td><button class="danger" onclick="delWorker(${x.id})">O‘chirish</button></td></tr>`).join('');$$('.workerSelect').forEach(s=>s.innerHTML='<option value="">Tanlang</option>'+a.map(x=>`<option value="${x.id}">${x.ism} ${x.familiya||''}</option>`).join(''))}
+async function loadWorkers(){const a=await api('/api/ishchilar');$('#workersBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.lavozim||'')}</td><td>${esc(x.staj_yil)} yil</td><td>${money(x.kunlik_stavka)}</td><td>${money(x.oylik_maosh)}</td><td><button class="danger" onclick="delWorker(${esc(x.id)})">O‘chirish</button></td></tr>`).join('');$$('.workerSelect').forEach(s=>s.innerHTML='<option value="">Tanlang</option>'+a.map(x=>`<option value="${esc(x.id)}">${esc(x.ism)} ${esc(x.familiya||'')}</option>`).join(''))}
 async function delWorker(i){if(confirm('O‘chirasizmi?')){await api('/api/ishchilar/'+i,{method:'DELETE'});refresh()}}
-async function loadTypes(){const a=await api('/api/ish-turlari');$('#workTypeSelect').innerHTML=a.map(x=>`<option value="${x.id}">${x.kategoriya} — ${x.nomi} (${x.birlik})</option>`).join('')}
-async function loadAttendance(){const a=await api('/api/keldi-ketdi');$('#attendanceBody').innerHTML=a.map(x=>`<tr><td>${x.ism} ${x.familiya||''}</td><td>${x.sana}</td><td>${x.keldi_vaqti}</td><td>${x.ketdi_vaqti}</td><td>${x.ish_soatlari}</td></tr>`).join('')}
-async function loadResults(){const a=await api('/api/natijalar');$('#resultsBody').innerHTML=a.map(x=>`<tr><td>${x.ism} ${x.familiya||''}</td><td>${x.ish_turi}</td><td>${x.sana}</td><td>${x.miqdor} ${x.birlik}</td><td>${money(x.jami_haq)}</td><td>${x.buyurtma_kodi||''}</td></tr>`).join('')}
-async function loadOrders(){const a=await api('/api/buyurtmalar');$$('.orderSelect').forEach(s=>s.innerHTML='<option value="">Tanlang</option>'+a.map(x=>`<option value="${x.id}">${x.kod} — ${x.mijoz}</option>`).join(''));$('#ordersBody').innerHTML=a.map(x=>`<tr><td>${x.kod}</td><td>${x.mijoz}</td><td>${x.mahsulot||''}</td><td>${money(x.umumiy_narx)}</td><td>${money(x.oldindan_tolov)}</td><td class="balance">${money(x.qoldiq)}</td><td><span class="badge">${x.holat}</span></td><td><span id="pr${x.id}">0%</span></td><td><button onclick="openStage(${x.id})">Ko‘rish</button></td><td><button onclick="addOrderPayment(${x.id})">To‘lov</button></td><td><a href="/buyurtma/${x.id}/shartnoma.docx"><button>Word</button></a> <a href="/buyurtma/${x.id}/shartnoma.pdf" target="_blank"><button>PDF</button></a> <button onclick="regenContract(${x.id})">Yangilash</button> <a href="/buyurtma/${x.id}/chek.pdf" target="_blank"><button>Chek</button></a> <a href="/buyurtma/${x.id}/qr.png" target="_blank"><button class="ok">QR</button></a> <button onclick="copyTrack(${x.id})">Link</button></td></tr>`).join('')}
-async function openStage(id){const a=await api('/api/buyurtma/'+id+'/bosqichlar');$('#stageList').innerHTML=a.map(x=>`<label class="stage"><input type="checkbox" ${x.bajarildi?'checked':''} onchange="toggleStage(${x.id},this.checked)"> ${x.bosqich}</label>`).join('');$('#stageModal').style.display='grid'}
+async function loadTypes(){const a=await api('/api/ish-turlari');$('#workTypeSelect').innerHTML=a.map(x=>`<option value="${esc(x.id)}">${esc(x.kategoriya)} — ${esc(x.nomi)} (${esc(x.birlik)})</option>`).join('')}
+async function loadAttendance(){const a=await api('/api/keldi-ketdi');$('#attendanceBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td>${esc(x.keldi_vaqti)}</td><td>${esc(x.ketdi_vaqti)}</td><td>${esc(x.ish_soatlari)}</td></tr>`).join('')}
+async function loadResults(){const a=await api('/api/natijalar');$('#resultsBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.ish_turi)}</td><td>${esc(x.sana)}</td><td>${esc(x.miqdor)} ${esc(x.birlik)}</td><td>${money(x.jami_haq)}</td><td>${esc(x.buyurtma_kodi||'')}</td></tr>`).join('')}
+async function loadOrders(){const a=await api('/api/buyurtmalar');$$('.orderSelect').forEach(s=>s.innerHTML='<option value="">Tanlang</option>'+a.map(x=>`<option value="${esc(x.id)}">${esc(x.kod)} — ${esc(x.mijoz)}</option>`).join(''));$('#ordersBody').innerHTML=a.map(x=>`<tr><td>${esc(x.kod)}</td><td>${esc(x.mijoz)}</td><td>${esc(x.mahsulot||'')}</td><td>${money(x.umumiy_narx)}</td><td>${money(x.oldindan_tolov)}</td><td class="balance">${money(x.qoldiq)}</td><td><span class="badge">${esc(x.holat)}</span></td><td><span id="pr${esc(x.id)}">0%</span></td><td><button onclick="openStage(${esc(x.id)})">Ko‘rish</button></td><td><button onclick="addOrderPayment(${esc(x.id)})">To‘lov</button></td><td><a href="/buyurtma/${esc(x.id)}/shartnoma.docx"><button>Word</button></a> <a href="/buyurtma/${esc(x.id)}/shartnoma.pdf" target="_blank"><button>PDF</button></a> <button onclick="regenContract(${esc(x.id)})">Yangilash</button> <a href="/buyurtma/${esc(x.id)}/chek.pdf" target="_blank"><button>Chek</button></a> <a href="/buyurtma/${esc(x.id)}/qr.png" target="_blank"><button class="ok">QR</button></a> <button onclick="copyTrack(${esc(x.id)})">Link</button></td></tr>`).join('')}
+async function openStage(id){const a=await api('/api/buyurtma/'+id+'/bosqichlar');$('#stageList').innerHTML=a.map(x=>`<label class="stage"><input type="checkbox" ${x.bajarildi?'checked':''} onchange="toggleStage(${esc(x.id)},this.checked)"> ${esc(x.bosqich)}</label>`).join('');$('#stageModal').style.display='grid'}
 function closeStage(){$('#stageModal').style.display='none'}
 async function toggleStage(id,v){await api('/api/buyurtma-bosqich/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bajarildi:v})})}
-async function loadStock(){const a=await api('/api/ombor');$('#stockSelect').innerHTML=a.map(x=>`<option value="${x.id}">${x.nomi} (${x.birlik})</option>`).join('');$('#stockBody').innerHTML=a.map(x=>`<tr class="${Number(x.qoldiq)<=Number(x.min_qoldiq)?'low':''}"><td>${x.nomi}</td><td>${x.kategoriya}</td><td>${x.qoldiq}</td><td>${x.birlik}</td><td>${x.min_qoldiq}</td></tr>`).join('')}
-async function loadTrips(){const a=await api('/api/safarlar');$('#tripsBody').innerHTML=a.map(x=>`<tr><td>${x.ism} ${x.familiya||''}</td><td>${x.sana}</td><td>${x.mashina||''}</td><td>${x.qayerdan||''} → ${x.qayerga||''}</td><td>${x.masofa_km}</td><td>${x.sabab||''}</td><td>${money(x.xarajat)}</td></tr>`).join('')}
-async function loadPayments(){const a=await api('/api/tolovlar');$('#paymentsBody').innerHTML=a.map(x=>`<tr><td>${x.ism} ${x.familiya||''}</td><td>${x.sana}</td><td>${money(x.miqdor)}</td><td>${x.turi}</td></tr>`).join('')}
-async function loadPenalties(){const a=await api('/api/jarimalar');$('#penaltiesBody').innerHTML=a.map(x=>`<tr><td>${x.ism} ${x.familiya||''}</td><td>${x.sana}</td><td class="minus">${money(x.miqdor)}</td><td>${x.sababi||''}</td></tr>`).join('')}
+async function loadStock(){const a=await api('/api/ombor');$('#stockSelect').innerHTML=a.map(x=>`<option value="${esc(x.id)}">${esc(x.nomi)} (${esc(x.birlik)})</option>`).join('');$('#stockBody').innerHTML=a.map(x=>`<tr class="${Number(x.qoldiq)<=Number(x.min_qoldiq)?'low':''}"><td>${esc(x.nomi)}</td><td>${esc(x.kategoriya)}</td><td>${esc(x.qoldiq)}</td><td>${esc(x.birlik)}</td><td>${esc(x.min_qoldiq)}</td></tr>`).join('')}
+async function loadTrips(){const a=await api('/api/safarlar');$('#tripsBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td>${esc(x.mashina||'')}</td><td>${esc(x.qayerdan||'')} → ${esc(x.qayerga||'')}</td><td>${esc(x.masofa_km)}</td><td>${esc(x.sabab||'')}</td><td>${money(x.xarajat)}</td></tr>`).join('')}
+async function loadPayments(){const a=await api('/api/tolovlar');$('#paymentsBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td>${money(x.miqdor)}</td><td>${esc(x.turi)}</td></tr>`).join('')}
+async function loadPenalties(){const a=await api('/api/jarimalar');$('#penaltiesBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td class="minus">${money(x.miqdor)}</td><td>${esc(x.sababi||'')}</td></tr>`).join('')}
 async function loadDashboard(){const x=await api('/api/dashboard');$('#dWorkers').textContent=x.workers;$('#dOrders').textContent=x.orders;$('#dHours').textContent=x.hours;$('#dProduction').textContent=x.production;$('#dKm').textContent=x.km;$('#dLow').textContent=x.low_stock}
 function setMonth(){const d=new Date(),y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0');$('#totalStart').value=`${y}-${m}-01`;$('#totalEnd').value=new Date(y,d.getMonth()+1,0).toISOString().slice(0,10);loadTotals()}
-async function loadTotals(){const s=$('#totalStart').value||'1900-01-01',e=$('#totalEnd').value||'2999-12-31';$('#csvLink').href=`/export/jami.csv?start=${s}&end=${e}`;const a=await api(`/api/jami?start=${s}&end=${e}`);$('#totalsBody').innerHTML=a.map((x,i)=>`<tr><td>${i+1}</td><td>${x.ism} ${x.familiya||''}</td><td>${x.lavozim||''}</td><td>${x.ish_kunlari}</td><td>${x.jami_soat}</td><td>${x.jami_miqdor}</td><td class="money">${money(x.ish_haqi)}</td><td class="minus">${money(x.jarima)}</td><td class="money">${money(x.bonus)}</td><td>${money(x.tolangan)}</td><td class="balance">${money(x.qoldiq)}</td><td>${x.reyting}</td></tr>`).join('')}
+async function loadTotals(){const s=$('#totalStart').value||'1900-01-01',e=$('#totalEnd').value||'2999-12-31';$('#csvLink').href=`/export/jami.csv?start=${s}&end=${e}`;const a=await api(`/api/jami?start=${s}&end=${e}`);$('#totalsBody').innerHTML=a.map((x,i)=>`<tr><td>${i+1}</td><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.lavozim||'')}</td><td>${esc(x.ish_kunlari)}</td><td>${esc(x.jami_soat)}</td><td>${esc(x.jami_miqdor)}</td><td class="money">${money(x.ish_haqi)}</td><td class="minus">${money(x.jarima)}</td><td class="money">${money(x.bonus)}</td><td>${money(x.tolangan)}</td><td class="balance">${money(x.qoldiq)}</td><td>${esc(x.reyting)}</td></tr>`).join('')}
 
-async function loadExpenses(){const a=await api('/api/xarajatlar');$('#expensesBody').innerHTML=a.map(x=>`<tr><td>${x.sana}</td><td>${x.kategoriya}</td><td>${x.xarajat_nomi||''}</td><td class="minus">${money(x.miqdor)}</td><td>${x.tolov_usuli||'Naqd'}</td><td>${x.buyurtma_kodi||''}</td><td>${x.kimga_berildi||''}</td><td>${x.tavsifi||''}</td></tr>`).join('')}
-async function clockIn(){const id=$('#autoWorkerSelect').value,m=$('#attendanceAutoMsg');if(!id){m.textContent='Ishchini tanlang';return}try{const x=await api('/api/davomat/keldi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ishchi_id:id})});m.textContent=`✅ Keldi: ${x.sana} ${x.vaqt}`;loadAttendance();loadDashboard()}catch(e){m.textContent='❌ '+e.message}}
-async function clockOut(){const id=$('#autoWorkerSelect').value,m=$('#attendanceAutoMsg');if(!id){m.textContent='Ishchini tanlang';return}try{const x=await api('/api/davomat/ketdi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ishchi_id:id})});m.textContent=`✅ Ketdi: ${x.sana} ${x.vaqt} — ${x.ish_soatlari} soat`;loadAttendance();loadDashboard()}catch(e){m.textContent='❌ '+e.message}}
-async function loadBonuses(){const a=await api('/api/bonuslar');$('#bonusesBody').innerHTML=a.map(x=>`<tr><td>${x.ism} ${x.familiya||''}</td><td>${x.sana}</td><td class="money">${money(x.miqdor)}</td><td>${x.sababi||''}</td></tr>`).join('')}
-async function loadStatuses(){const a=await api('/api/ishchi-holatlari');$('#statusesBody').innerHTML=a.map(x=>`<tr><td>${x.ism} ${x.familiya||''}</td><td>${x.sana}</td><td>${x.turi}</td><td>${x.izoh||''}</td></tr>`).join('')}
-async function loadFinished(){const a=await api('/api/tayyor-mahsulot');$('#finishedBody').innerHTML=a.map(x=>`<tr><td>${x.nomi}</td><td>${x.kodi||''}</td><td>${x.rang||''}</td><td>${x.miqdor} ${x.birlik}</td><td>${money(x.narx)}</td></tr>`).join('')}
+async function loadExpenses(){const a=await api('/api/xarajatlar');$('#expensesBody').innerHTML=a.map(x=>`<tr><td>${esc(x.sana)}</td><td>${esc(x.kategoriya)}</td><td>${esc(x.xarajat_nomi||'')}</td><td class="minus">${money(x.miqdor)}</td><td>${esc(x.tolov_usuli||'Naqd')}</td><td>${esc(x.buyurtma_kodi||'')}</td><td>${esc(x.kimga_berildi||'')}</td><td>${esc(x.tavsifi||'')}</td></tr>`).join('')}
+async function clockIn(){const id=$('#autoWorkerSelect').value,m=$('#attendanceAutoMsg');if(!id){m.textContent='Ishchini tanlang';return}try{const x=await api('/api/davomat/keldi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ishchi_id:id})});m.textContent=`✅ Keldi: ${esc(x.sana)} ${esc(x.vaqt)}`;loadAttendance();loadDashboard()}catch(e){m.textContent='❌ '+e.message}}
+async function clockOut(){const id=$('#autoWorkerSelect').value,m=$('#attendanceAutoMsg');if(!id){m.textContent='Ishchini tanlang';return}try{const x=await api('/api/davomat/ketdi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ishchi_id:id})});m.textContent=`✅ Ketdi: ${esc(x.sana)} ${esc(x.vaqt)} — ${esc(x.ish_soatlari)} soat`;loadAttendance();loadDashboard()}catch(e){m.textContent='❌ '+e.message}}
+async function loadBonuses(){const a=await api('/api/bonuslar');$('#bonusesBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td class="money">${money(x.miqdor)}</td><td>${esc(x.sababi||'')}</td></tr>`).join('')}
+async function loadStatuses(){const a=await api('/api/ishchi-holatlari');$('#statusesBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td>${esc(x.turi)}</td><td>${esc(x.izoh||'')}</td></tr>`).join('')}
+async function loadFinished(){const a=await api('/api/tayyor-mahsulot');$('#finishedBody').innerHTML=a.map(x=>`<tr><td>${esc(x.nomi)}</td><td>${esc(x.kodi||'')}</td><td>${esc(x.rang||'')}</td><td>${esc(x.miqdor)} ${esc(x.birlik)}</td><td>${money(x.narx)}</td></tr>`).join('')}
 async function loadFinance(){const s=$('#finStart').value||'1900-01-01',e=$('#finEnd').value||'2999-12-31',x=await api(`/api/moliyaviy-xulosa?start=${s}&end=${e}`);$('#fIncome').textContent=money(x.kirim);$('#fExpense').textContent=money(x.xarajat);$('#fSalary').textContent=money(x.ishchi_tolov);$('#fBonus').textContent=money(x.bonus);$('#fProfit').textContent=money(x.sof_foyda)}
 async function addOrderPayment(id){const miqdor=prompt('To‘lov summasi');if(!miqdor)return;await api(`/api/buyurtma/${id}/tolovlar`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sana:today,miqdor})});refresh()}
 async function regenContract(id){try{const x=await api(`/buyurtma/${id}/shartnoma-yaratish`,{method:'POST'});alert('Shartnoma yangilandi. Versiya: '+x.versiya)}catch(e){alert('Xato: '+e.message)}}
 async function copyTrack(id){const x=await api(`/api/buyurtma/${id}/link`);try{await navigator.clipboard.writeText(x.url);alert('Mijoz kuzatuv havolasi nusxalandi')}catch(e){prompt('Havolani nusxalang:',x.url)}}
-async function loadProgress(){const rows=await api('/api/buyurtmalar');for(const x of rows){try{const p=await api(`/api/buyurtma-progress/${x.id}`),el=$(`#pr${x.id}`);if(el)el.textContent=p.foiz+'%'}catch(e){}}}
+async function loadProgress(){const rows=await api('/api/buyurtmalar');for(const x of rows){try{const p=await api(`/api/buyurtma-progress/${esc(x.id)}`),el=$(`#pr${esc(x.id)}`);if(el)el.textContent=p.foiz+'%'}catch(e){}}}
 
 
-async function loadExtras(){const a=await api('/api/qoshimcha-ish');$('#extrasBody').innerHTML=a.map(x=>`<tr><td>${x.kod}</td><td>${x.mijoz}</td><td>${x.nomi}</td><td>${money(x.summa)}</td><td>${x.qoshimcha_kun}</td></tr>`).join('')}
-async function loadService(){const a=await api('/api/servis');$('#serviceBody').innerHTML=a.map(x=>`<tr><td>${x.kod}</td><td>${x.mijoz}</td><td>${x.turi}</td><td>${x.muammo}</td><td><span class="badge">${x.holat}</span></td><td>${x.servis_sana||''}</td><td>${x.usta||''}</td></tr>`).join('')}
-async function loadDelivery(){const a=await api('/api/yetkazish');$('#deliveryBody').innerHTML=a.map(x=>`<tr><td>${x.sana}</td><td>${x.navbat}</td><td>${x.kod}</td><td>${x.mijoz}</td><td>${x.haydovchi_ism||''} ${x.haydovchi_familiya||''}</td><td>${x.lokatsiya?`<a href="${x.lokatsiya}" target="_blank">Xarita</a>`:(x.manzil||'')}</td><td>${x.holat}</td><td><button onclick="deliveryState(${x.id},'Yo‘lga chiqdim')">Yo‘lga</button> <button class="ok" onclick="deliveryState(${x.id},'Yetkazib berdim')">Topshirildi</button></td></tr>`).join('')}
+async function loadExtras(){const a=await api('/api/qoshimcha-ish');$('#extrasBody').innerHTML=a.map(x=>`<tr><td>${esc(x.kod)}</td><td>${esc(x.mijoz)}</td><td>${esc(x.nomi)}</td><td>${money(x.summa)}</td><td>${esc(x.qoshimcha_kun)}</td></tr>`).join('')}
+async function loadService(){const a=await api('/api/servis');$('#serviceBody').innerHTML=a.map(x=>`<tr><td>${esc(x.kod)}</td><td>${esc(x.mijoz)}</td><td>${esc(x.turi)}</td><td>${esc(x.muammo)}</td><td><span class="badge">${esc(x.holat)}</span></td><td>${esc(x.servis_sana||'')}</td><td>${esc(x.usta||'')}</td></tr>`).join('')}
+async function loadDelivery(){const a=await api('/api/yetkazish');$('#deliveryBody').innerHTML=a.map(x=>`<tr><td>${esc(x.sana)}</td><td>${esc(x.navbat)}</td><td>${esc(x.kod)}</td><td>${esc(x.mijoz)}</td><td>${esc(x.haydovchi_ism||'')} ${esc(x.haydovchi_familiya||'')}</td><td>${x.lokatsiya?`<a href="${esc(x.lokatsiya)}" target="_blank">Xarita</a>`:esc(x.manzil||'')}</td><td>${esc(x.holat)}</td><td><button onclick="deliveryState(${esc(x.id)},'Yo‘lga chiqdim')">Yo‘lga</button> <button class="ok" onclick="deliveryState(${esc(x.id)},'Yetkazib berdim')">Topshirildi</button></td></tr>`).join('')}
 async function deliveryState(id,holat){await api(`/api/yetkazish/${id}/holat`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({holat})});loadDelivery()}
 
 async function refresh(){await Promise.all([loadWorkers(),loadTypes(),loadAttendance(),loadResults(),loadOrders(),loadStock(),loadTrips(),loadPayments(),loadPenalties(),loadDashboard(),loadTotals(),loadExpenses(),loadBonuses(),loadStatuses(),loadFinished(),loadFinance(),loadProgress(),loadExtras(),loadService(),loadDelivery()])}
@@ -2440,8 +2616,6 @@ bind('#workerForm','/api/ishchilar');bind('#attendanceForm','/api/keldi-ketdi');
 </script>
 </body></html>
 """
-
-init_db()
 
 if __name__ == "__main__":
     init_db()
