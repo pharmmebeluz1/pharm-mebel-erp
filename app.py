@@ -2132,7 +2132,7 @@ HTML = r"""
 <html lang="uz">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Mebel360 V5.1.4</title>
+<title>Mebel360 V5.1.5</title>
 <style>
 :root{--nav:#0f1b33;--blue:#2563eb;--bg:#eef3f8;--card:#fff;--text:#182235;--muted:#64748b;--danger:#dc2626;--ok:#16a34a}
 *{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:var(--bg);color:var(--text)}
@@ -2159,7 +2159,7 @@ th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:no
 </style>
 </head>
 <body>
-<header><div class="top"><div><h1>🏭 Mebel360 V5.1.4</h1><div class="sub">Ishchilar, buyurtmalar, ombor, ishlab chiqarish va moliya</div></div><div><a href="/pro-boshqaruv"><button style="background:#0f766e">PRO boshqaruv</button></a> <a href="/shofyor-boshqaruv"><button style="background:#7c3aed">Shofyor boshqaruvi</button></a> <a href="/shartnoma-namuna"><button style="background:#0f766e">Shartnoma Word</button></a> <a href="/shartnoma-pdf" target="_blank"><button style="background:#0369a1">Shartnoma PDF</button></a> <a href="/backup"><button style="background:#16a34a">Backup</button></a> <a href="/logout"><button style="background:#dc2626">Chiqish</button></a></div></div></header>
+<header><div class="top"><div><h1>🏭 Mebel360 V5.1.5</h1><div class="sub">Ishchilar, buyurtmalar, ombor, ishlab chiqarish va moliya</div></div><div><a href="/pro-boshqaruv"><button style="background:#0f766e">PRO boshqaruv</button></a> <a href="/shofyor-boshqaruv"><button style="background:#7c3aed">Shofyor boshqaruvi</button></a> <a href="/shartnoma-namuna"><button style="background:#0f766e">Shartnoma Word</button></a> <a href="/shartnoma-pdf" target="_blank"><button style="background:#0369a1">Shartnoma PDF</button></a> <a href="/backup"><button style="background:#16a34a">Backup</button></a> <a href="/logout"><button style="background:#dc2626">Chiqish</button></a></div></div></header>
 <main class="wrap">
 <div class="cards">
  <div class="card"><span>ISHCHILAR</span><b id="dWorkers">0</b></div>
@@ -2440,6 +2440,8 @@ bind('#workerForm','/api/ishchilar');bind('#attendanceForm','/api/keldi-ketdi');
 </script>
 </body></html>
 """
+
+init_db()
 
 if __name__ == "__main__":
     init_db()
