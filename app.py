@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import csv
 import io
 import os
@@ -1712,7 +1712,7 @@ def order_receipt_pdf(oid):
     order,stages,pays=_order_bundle(oid)
     if not order:return "Topilmadi",404
     out=io.BytesIO(); p=canvas.Canvas(out,pagesize=A4); w,h=A4
-    p.setFont('Helvetica-Bold',20); p.drawCentredString(w/2,h-60,'PHARM MEBEL - TOLOV CHEKI')
+    p.setFont('Helvetica-Bold',20); p.drawCentredString(w/2,h-60,'Mebel360 - TOLOV CHEKI')
     p.setFont('Helvetica',12); y=h-110
     paid=float(order['oldindan_tolov'] or 0); remaining=float(order['umumiy_narx'] or 0)-paid
     for line in [f"Buyurtma: {order['kod']}",f"Mijoz: {order['mijoz']}",f"Mahsulot: {order['mahsulot']}",f"Umumiy summa: {order['umumiy_narx']:,.0f} so'm",f"Jami to'langan: {paid:,.0f} so'm",f"Qoldiq: {remaining:,.0f} so'm",f"Chek sanasi: {date.today().isoformat()}"]:
