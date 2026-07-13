@@ -1239,6 +1239,47 @@ def workers_delete(i):
     return jsonify({"status":"ok"})
 
 
+# ---------- ISHCHI AKKAUNTLARINI TASDIQLASH ----------
+@app.route("/api/ishchi-akkauntlari", methods=["GET"])
+def worker_accounts_get_api():
+    c=get_db()
+    rows=c.execute("""SELECT a.id,a.ishchi_id,a.telefon,a.login,a.tasdiqlangan,
+                      a.admin_tasdiq,a.faol,a.created_at,
+                      COALESCE(i.ism,'Noma’lum') AS ism,
+                      COALESCE(i.familiya,'') AS familiya,
+                      COALESCE(i.lavozim,'Ishchi') AS lavozim
+                      FROM ishchi_akkauntlari a
+                      LEFT JOIN ishchilar i ON i.id=a.ishchi_id
+                      ORDER BY CASE WHEN a.faol=1 AND a.admin_tasdiq=0 THEN 0 ELSE 1 END,
+                               a.id DESC""").fetchall()
+    c.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/ishchi-akkauntlari/<int:account_id>/tasdiqlash", methods=["POST"])
+def worker_account_approve_api(account_id):
+    c=get_db()
+    cur=c.execute("UPDATE ishchi_akkauntlari SET admin_tasdiq=1,faol=1 WHERE id=?",(account_id,))
+    if cur.rowcount == 0:
+        c.close()
+        return jsonify({"message":"Ishchi akkaunti topilmadi"}),404
+    c.commit(); c.close()
+    log_action('worker_approved', f'account_id={account_id}')
+    return jsonify({"status":"ok","message":"Ishchi tasdiqlandi"})
+
+
+@app.route("/api/ishchi-akkauntlari/<int:account_id>/bloklash", methods=["POST"])
+def worker_account_block_api(account_id):
+    c=get_db()
+    cur=c.execute("UPDATE ishchi_akkauntlari SET faol=0 WHERE id=?",(account_id,))
+    if cur.rowcount == 0:
+        c.close()
+        return jsonify({"message":"Ishchi akkaunti topilmadi"}),404
+    c.commit(); c.close()
+    log_action('worker_blocked', f'account_id={account_id}')
+    return jsonify({"status":"ok","message":"Ishchi akkaunti bloklandi"})
+
+
 # ---------- KELDI KETDI ----------
 @app.route("/api/keldi-ketdi", methods=["GET"])
 def attendance_get():
@@ -2152,7 +2193,7 @@ def worker_admin():
     if request.method=='POST':
         action=request.form.get('action')
         if action=='approve':
-            aid=int(request.form['account_id']); c.execute('UPDATE ishchi_akkauntlari SET admin_tasdiq=1 WHERE id=?',(aid,)); log_action('worker_approved', f'account_id={aid}')
+            aid=int(request.form['account_id']); c.execute('UPDATE ishchi_akkauntlari SET admin_tasdiq=1,faol=1 WHERE id=?',(aid,)); log_action('worker_approved', f'account_id={aid}')
         elif action=='block':
             aid=int(request.form['account_id']); c.execute('UPDATE ishchi_akkauntlari SET faol=0 WHERE id=?',(aid,)); log_action('worker_blocked', f'account_id={aid}')
         elif action=='task':
@@ -2447,6 +2488,7 @@ th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:no
   <div id="pharmDate" class="live-clock-date">Toshkent vaqti</div>
 </div>
 <div class="header-actions">
+  <a href="/ishchi-boshqaruv"><button style="background:#16a34a">👷 Ishchi tasdiqlash <span id="workerPendingBadge" style="display:none;margin-left:5px;background:#fff;color:#b91c1c;border-radius:999px;padding:2px 7px;font-size:11px"></span></button></a>
   <a href="/pro-boshqaruv"><button style="background:#0f766e">PRO boshqaruv</button></a>
   <a href="/shofyor-boshqaruv"><button style="background:#7c3aed">Shofyor boshqaruvi</button></a>
   <a href="/shartnoma-namuna"><button style="background:#0f766e">Shartnoma Word</button></a>
@@ -2506,7 +2548,16 @@ th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:no
 <label>Favqulodda aloqa telefoni<input name="favqulodda_telefon"></label>
 <label>Izoh<textarea name="izoh"></textarea></label><button>Saqlash</button><div class="msg"></div>
 </form></div><div class="panel tablewrap"><h3>Ishchilar</h3><table><thead><tr><th>Ism</th><th>Lavozim</th><th>Staj</th><th>Kunlik</th><th>Oylik</th><th></th></tr></thead><tbody id="workersBody"></tbody></table></div>
-</div></section>
+</div>
+<div class="panel" style="margin-top:14px;overflow:auto">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+    <div><h3 style="margin-bottom:4px">👷 Ishchi akkauntlarini tasdiqlash</h3><div style="font-size:12px;color:#64748b">Telefon orqali ro‘yxatdan o‘tgan ishchilar shu yerda chiqadi.</div></div>
+    <a href="/ishchi-boshqaruv" style="text-decoration:none"><button type="button" style="background:#0f766e">To‘liq ishchi boshqaruvi</button></a>
+  </div>
+  <div id="workerAccountsMsg" class="msg"></div>
+  <table style="margin-top:8px"><thead><tr><th>Ishchi</th><th>Telefon</th><th>Login</th><th>Holat</th><th>Amal</th></tr></thead><tbody id="workerAccountsBody"></tbody></table>
+</div>
+</section>
 
 <section id="attendance" class="tab"><div class="grid"><div class="panel"><h3>Avtomatik keldi-ketdi</h3>
 <label>Ishchi<select class="workerSelect" id="autoWorkerSelect" required></select></label>
@@ -2696,6 +2747,35 @@ function money(v){return Number(v||0).toLocaleString('uz-UZ',{maximumFractionDig
 
 async function loadWorkers(){const a=await api('/api/ishchilar');$('#workersBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.lavozim||'')}</td><td>${esc(x.staj_yil)} yil</td><td>${money(x.kunlik_stavka)}</td><td>${money(x.oylik_maosh)}</td><td><button class="danger" onclick="delWorker(${esc(x.id)})">O‘chirish</button></td></tr>`).join('');$$('.workerSelect').forEach(s=>s.innerHTML='<option value="">Tanlang</option>'+a.map(x=>`<option value="${esc(x.id)}">${esc(x.ism)} ${esc(x.familiya||'')}</option>`).join(''))}
 async function delWorker(i){if(confirm('O‘chirasizmi?')){await api('/api/ishchilar/'+i,{method:'DELETE'});refresh()}}
+async function loadWorkerAccounts(){
+  const a=await api('/api/ishchi-akkauntlari');
+  const pending=a.filter(x=>Number(x.faol)===1&&Number(x.admin_tasdiq)===0).length;
+  const badge=$('#workerPendingBadge');
+  if(badge){badge.textContent=pending;badge.style.display=pending?'inline-block':'none'}
+  const body=$('#workerAccountsBody');
+  if(!body)return;
+  if(!a.length){body.innerHTML='<tr><td colspan="5" style="text-align:center;color:#64748b;padding:18px">Hozircha telefon orqali ro‘yxatdan o‘tgan ishchi yo‘q.</td></tr>';return}
+  body.innerHTML=a.map(x=>{
+    let status='✅ Tasdiqlangan';
+    if(Number(x.faol)===0)status='⛔ Bloklangan';
+    else if(Number(x.admin_tasdiq)===0)status='⏳ Kutilmoqda';
+    let actions='';
+    if(Number(x.admin_tasdiq)===0||Number(x.faol)===0){actions+=`<button class="ok" style="padding:6px 9px;margin-right:5px" onclick="approveWorkerAccount(${Number(x.id)})">${Number(x.faol)===0?'Faollashtirish':'Tasdiqlash'}</button>`}
+    if(Number(x.faol)===1){actions+=`<button class="danger" onclick="blockWorkerAccount(${Number(x.id)})">Bloklash</button>`}
+    return `<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.telefon||'-')}</td><td>${esc(x.login||'-')}</td><td>${status}</td><td>${actions}</td></tr>`
+  }).join('')
+}
+async function approveWorkerAccount(id){
+  const msg=$('#workerAccountsMsg');
+  try{const r=await api(`/api/ishchi-akkauntlari/${id}/tasdiqlash`,{method:'POST'});if(msg)msg.textContent='✅ '+(r.message||'Ishchi tasdiqlandi');await loadWorkerAccounts()}
+  catch(e){if(msg)msg.textContent='❌ '+e.message}
+}
+async function blockWorkerAccount(id){
+  if(!confirm('Ishchi akkauntini bloklaysizmi?'))return;
+  const msg=$('#workerAccountsMsg');
+  try{const r=await api(`/api/ishchi-akkauntlari/${id}/bloklash`,{method:'POST'});if(msg)msg.textContent='✅ '+(r.message||'Akkaunt bloklandi');await loadWorkerAccounts()}
+  catch(e){if(msg)msg.textContent='❌ '+e.message}
+}
 async function loadTypes(){const a=await api('/api/ish-turlari');$('#workTypeSelect').innerHTML=a.map(x=>`<option value="${esc(x.id)}">${esc(x.kategoriya)} — ${esc(x.nomi)} (${esc(x.birlik)})</option>`).join('')}
 async function loadAttendance(){const a=await api('/api/keldi-ketdi');$('#attendanceBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td>${esc(x.keldi_vaqti)}</td><td>${esc(x.ketdi_vaqti)}</td><td>${esc(x.ish_soatlari)}</td></tr>`).join('')}
 async function loadResults(){const a=await api('/api/natijalar');$('#resultsBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.ish_turi)}</td><td>${esc(x.sana)}</td><td>${esc(x.miqdor)} ${esc(x.birlik)}</td><td>${money(x.jami_haq)}</td><td>${esc(x.buyurtma_kodi||'')}</td></tr>`).join('')}
@@ -2729,7 +2809,7 @@ async function loadService(){const a=await api('/api/servis');$('#serviceBody').
 async function loadDelivery(){const a=await api('/api/yetkazish');$('#deliveryBody').innerHTML=a.map(x=>`<tr><td>${esc(x.sana)}</td><td>${esc(x.navbat)}</td><td>${esc(x.kod)}</td><td>${esc(x.mijoz)}</td><td>${esc(x.haydovchi_ism||'')} ${esc(x.haydovchi_familiya||'')}</td><td>${x.lokatsiya?`<a href="${esc(x.lokatsiya)}" target="_blank">Xarita</a>`:esc(x.manzil||'')}</td><td>${esc(x.holat)}</td><td><button onclick="deliveryState(${esc(x.id)},'Yo‘lga chiqdim')">Yo‘lga</button> <button class="ok" onclick="deliveryState(${esc(x.id)},'Yetkazib berdim')">Topshirildi</button></td></tr>`).join('')}
 async function deliveryState(id,holat){await api(`/api/yetkazish/${id}/holat`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({holat})});loadDelivery()}
 
-async function refresh(){await Promise.all([loadWorkers(),loadTypes(),loadAttendance(),loadResults(),loadOrders(),loadStock(),loadTrips(),loadPayments(),loadPenalties(),loadDashboard(),loadTotals(),loadExpenses(),loadBonuses(),loadStatuses(),loadFinished(),loadFinance(),loadProgress(),loadExtras(),loadService(),loadDelivery()])}
+async function refresh(){await Promise.all([loadWorkers(),loadWorkerAccounts(),loadTypes(),loadAttendance(),loadResults(),loadOrders(),loadStock(),loadTrips(),loadPayments(),loadPenalties(),loadDashboard(),loadTotals(),loadExpenses(),loadBonuses(),loadStatuses(),loadFinished(),loadFinance(),loadProgress(),loadExtras(),loadService(),loadDelivery()])}
 const rf=$('#ratingForm');rf.onsubmit=async e=>{e.preventDefault();const d=fj(rf),id=d.buyurtma_id;delete d.buyurtma_id;const m=rf.querySelector('.msg');try{await api(`/api/buyurtma/${id}/baho`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});m.textContent='✅ Baho saqlandi'}catch(x){m.textContent='❌ '+x.message}};
 bind('#extraForm','/api/qoshimcha-ish');bind('#serviceForm','/api/servis');bind('#deliveryForm','/api/yetkazish');
 bind('#workerForm','/api/ishchilar');bind('#attendanceForm','/api/keldi-ketdi');bind('#resultForm','/api/natijalar');bind('#orderForm','/api/buyurtmalar');bind('#stockForm','/api/ombor-harakat');bind('#tripForm','/api/safarlar');bind('#paymentForm','/api/tolovlar');bind('#penaltyForm','/api/jarimalar');bind('#expenseForm','/api/xarajatlar');bind('#bonusForm','/api/bonuslar');bind('#statusForm','/api/ishchi-holatlari');bind('#finishedForm','/api/tayyor-mahsulot');setMonth();$('#finStart').value=$('#totalStart').value;$('#finEnd').value=$('#totalEnd').value;refresh();
