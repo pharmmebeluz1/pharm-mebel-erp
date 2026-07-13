@@ -584,12 +584,92 @@ def init_db():
     )
 
 
-    # PHARM_MEBEL_SEH_MIGRATION_V1
-    # Eski ma'lumotlar bazasidagi yozuvlarni yangi "Seh" shakliga o‘zgartiradi.
-    conn.execute("UPDATE ish_turlari SET nomi=REPLACE(nomi,'Sex','Seh') WHERE nomi LIKE '%Sex%'")
-    conn.execute("UPDATE ishchi_topshiriqlari SET ish_turi=REPLACE(ish_turi,'Sex','Seh') WHERE ish_turi LIKE '%Sex%'")
-    conn.execute("UPDATE buyurtma_bosqichlari SET bosqich=REPLACE(bosqich,'Sex','Seh') WHERE bosqich LIKE '%Sex%'")
-    conn.execute("UPDATE buyurtma_bosqich_hodisalari SET bosqich=REPLACE(bosqich,'Sex','Seh') WHERE bosqich LIKE '%Sex%'")
+    # PHARM_MEBEL_SEH_MIGRATION_V2_SAFE
+    # Eski bazadagi "Sex" yozuvlarini ma'lumot yo'qotmasdan "Seh" ga o‘tkazadi.
+    # Agar yangi nom avvaldan mavjud bo‘lsa, takroriy yozuvlar xavfsiz birlashtiriladi.
+
+    old_work_types = conn.execute("""
+        SELECT id, nomi FROM ish_turlari
+        WHERE nomi LIKE '%Sex%' OR nomi LIKE '%sex%' OR nomi LIKE '%SEX%'
+    """).fetchall()
+
+    for old_work in old_work_types:
+        old_id = int(old_work["id"])
+        old_name = str(old_work["nomi"] or "")
+        new_name = (old_name.replace("Sex", "Seh")
+                            .replace("sex", "seh")
+                            .replace("SEX", "SEH"))
+
+        existing_work = conn.execute(
+            "SELECT id FROM ish_turlari WHERE nomi=? AND id<>?",
+            (new_name, old_id)
+        ).fetchone()
+
+        if existing_work:
+            new_id = int(existing_work["id"])
+            # Eski ish natijalarini yangi ish turiga bog‘laymiz.
+            conn.execute(
+                "UPDATE ish_natijalari SET ish_turi_id=? WHERE ish_turi_id=?",
+                (new_id, old_id)
+            )
+            conn.execute("DELETE FROM ish_turlari WHERE id=?", (old_id,))
+        else:
+            conn.execute(
+                "UPDATE ish_turlari SET nomi=? WHERE id=?",
+                (new_name, old_id)
+            )
+
+    # Matn ko‘rinishida saqlangan topshiriqlar.
+    conn.execute("""
+        UPDATE ishchi_topshiriqlari
+        SET ish_turi=REPLACE(REPLACE(REPLACE(ish_turi,'Sex','Seh'),'sex','seh'),'SEX','SEH')
+        WHERE ish_turi LIKE '%Sex%' OR ish_turi LIKE '%sex%' OR ish_turi LIKE '%SEX%'
+    """)
+
+    # Buyurtma bosqichlarida bir xil yangi nom mavjud bo‘lsa, bajarilgan holatini birlashtiramiz.
+    old_stages = conn.execute("""
+        SELECT id, buyurtma_id, bosqich, bajarildi
+        FROM buyurtma_bosqichlari
+        WHERE bosqich LIKE '%Sex%' OR bosqich LIKE '%sex%' OR bosqich LIKE '%SEX%'
+    """).fetchall()
+
+    for old_stage in old_stages:
+        old_stage_id = int(old_stage["id"])
+        order_id = int(old_stage["buyurtma_id"])
+        old_stage_name = str(old_stage["bosqich"] or "")
+        new_stage_name = (old_stage_name.replace("Sex", "Seh")
+                                        .replace("sex", "seh")
+                                        .replace("SEX", "SEH"))
+
+        existing_stage = conn.execute("""
+            SELECT id, bajarildi FROM buyurtma_bosqichlari
+            WHERE buyurtma_id=? AND bosqich=? AND id<>?
+        """, (order_id, new_stage_name, old_stage_id)).fetchone()
+
+        if existing_stage:
+            merged_done = max(
+                int(existing_stage["bajarildi"] or 0),
+                int(old_stage["bajarildi"] or 0)
+            )
+            conn.execute(
+                "UPDATE buyurtma_bosqichlari SET bajarildi=? WHERE id=?",
+                (merged_done, int(existing_stage["id"]))
+            )
+            conn.execute(
+                "DELETE FROM buyurtma_bosqichlari WHERE id=?",
+                (old_stage_id,)
+            )
+        else:
+            conn.execute(
+                "UPDATE buyurtma_bosqichlari SET bosqich=? WHERE id=?",
+                (new_stage_name, old_stage_id)
+            )
+
+    conn.execute("""
+        UPDATE buyurtma_bosqich_hodisalari
+        SET bosqich=REPLACE(REPLACE(REPLACE(bosqich,'Sex','Seh'),'sex','seh'),'SEX','SEH')
+        WHERE bosqich LIKE '%Sex%' OR bosqich LIKE '%sex%' OR bosqich LIKE '%SEX%'
+    """)
 
     materials = [
         ("MDF 18 mm","Plita","list",0,5,0),
