@@ -50,35 +50,12 @@ def _get_or_create_secret_key():
     return new_key
 
 
-def _get_or_create_admin_password():
-    """PHARM_ERP_PASSWORD muhit o'zgaruvchisi bo'lmasa, standart "12345" o'rniga
-    tasodifiy parol yaratib, admin_parol.txt fayliga yozadi va konsolda ko'rsatadi."""
-    env_pwd = os.environ.get("PHARM_ERP_PASSWORD")
-    if env_pwd:
-        return env_pwd
-    pwd_path = os.path.join(_APP_DIR, "admin_parol.txt")
-    if os.path.exists(pwd_path):
-        with open(pwd_path, "r", encoding="utf-8") as f:
-            saved = f.read().strip()
-            if saved:
-                return saved
-    new_pwd = secrets.token_urlsafe(9)
-    try:
-        with open(pwd_path, "w", encoding="utf-8") as f:
-            f.write(new_pwd)
-    except Exception:
-        pass
-    print("=" * 60)
-    print(f"  BIRINCHI ISHGA TUSHIRISH: Rahbar (admin) paroli yaratildi:")
-    print(f"  Login: admin")
-    print(f"  Parol: {new_pwd}")
-    print(f"  (Bu parol '{pwd_path}' fayliga ham yozildi.)")
-    print("=" * 60)
-    return new_pwd
-
-
 app.secret_key = _get_or_create_secret_key()
-_ADMIN_PASSWORD = _get_or_create_admin_password()
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("PHARM_ERP_HTTPS", "0") == "1",
+)
 
 
 def get_db():
@@ -458,6 +435,16 @@ def init_db():
         huquqlar TEXT DEFAULT ''
     );
 
+
+    CREATE TABLE IF NOT EXISTS admin_akkauntlari (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        login TEXT UNIQUE NOT NULL,
+        parol_hash TEXT NOT NULL,
+        faol INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS audit_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         sana_vaqt TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -829,6 +816,42 @@ def init_db():
     stage_cols={r[1] for r in conn.execute("PRAGMA table_info(buyurtma_bosqichlari)").fetchall()}
     for col,typ in {"boshlanish_vaqti":"TEXT DEFAULT ''","tugash_vaqti":"TEXT DEFAULT ''","ishchi":"TEXT DEFAULT ''","izoh":"TEXT DEFAULT ''","media_url":"TEXT DEFAULT ''"}.items():
         if col not in stage_cols: conn.execute(f"ALTER TABLE buyurtma_bosqichlari ADD COLUMN {col} {typ}")
+    # ADMIN_XAVFSIZLIK_V1
+    # Eski ochiq admin parolini bir marta shifrlab bazaga ko'chiradi.
+    # Keyingi ishga tushirishlarda parol hech qachon TXT yoki CMDda ko'rsatilmaydi.
+    admin_login = (os.environ.get("PHARM_ERP_USER", "admin") or "admin").strip()
+    admin_row = conn.execute(
+        "SELECT id FROM admin_akkauntlari WHERE login=? LIMIT 1",
+        (admin_login,),
+    ).fetchone()
+    old_password_path = os.path.join(_APP_DIR, "admin_parol.txt")
+    if not admin_row:
+        bootstrap_password = (os.environ.get("PHARM_ERP_PASSWORD") or "").strip()
+        migrated_from_txt = False
+        if not bootstrap_password and os.path.exists(old_password_path):
+            try:
+                with open(old_password_path, "r", encoding="utf-8") as f:
+                    bootstrap_password = f.read().strip()
+                migrated_from_txt = bool(bootstrap_password)
+            except OSError:
+                bootstrap_password = ""
+        if bootstrap_password:
+            conn.execute(
+                "INSERT INTO admin_akkauntlari(login,parol_hash,faol) VALUES(?,?,1)",
+                (admin_login, generate_password_hash(bootstrap_password)),
+            )
+            if migrated_from_txt:
+                try:
+                    os.remove(old_password_path)
+                except OSError:
+                    pass
+    elif os.path.exists(old_password_path):
+        # Bazada xavfsiz akkaunt mavjud bo'lsa, eski ochiq parol fayli kerak emas.
+        try:
+            os.remove(old_password_path)
+        except OSError:
+            pass
+
     conn.commit()
     conn.close()
 
@@ -1065,7 +1088,7 @@ def _csrf_valid():
 # ---------- LOGIN URINISHLARINI CHEKLASH (BRUTE-FORCE HIMOYASI) ----------
 _login_attempts = {}
 LOGIN_MAX_ATTEMPTS = 5
-LOGIN_LOCKOUT_SECONDS = 300
+LOGIN_LOCKOUT_SECONDS = 900
 
 def _login_key(username):
     return f"{request.remote_addr}:{username}"
@@ -1138,7 +1161,7 @@ def require_login():
     _auto_backup_if_needed()
     public_endpoints = {
         "splash",
-        "login", "static", "public_track", "order_qr",
+        "login", "admin_setup", "static", "public_track", "order_qr",
         "worker_register", "worker_verify", "worker_login", "worker_logout", "driver_login", "driver_logout", "driver_register"
     }
     # CSRF tekshiruvi: barcha oddiy HTML-forma orqali yuboriladigan POST so'rovlar uchun.
@@ -1161,20 +1184,79 @@ def require_login():
         return redirect(url_for("login"))
 
 
+def _admin_account(login):
+    c = get_db()
+    row = c.execute(
+        "SELECT id,login,parol_hash,faol FROM admin_akkauntlari WHERE login=? LIMIT 1",
+        ((login or "").strip(),),
+    ).fetchone()
+    c.close()
+    return row
+
+
+def _admin_is_configured():
+    c = get_db()
+    row = c.execute("SELECT id FROM admin_akkauntlari WHERE faol=1 LIMIT 1").fetchone()
+    c.close()
+    return bool(row)
+
+
+@app.route("/admin/setup", methods=["GET", "POST"])
+def admin_setup():
+    if _admin_is_configured():
+        return redirect(url_for("login"))
+    error = ""
+    if request.method == "POST":
+        user = (request.form.get("user") or "admin").strip()
+        password = request.form.get("password") or ""
+        confirm = request.form.get("confirm") or ""
+        if len(user) < 3:
+            error = "Login kamida 3 ta belgidan iborat bo‘lsin."
+        elif _weak_password(password):
+            error = "Parol kamida 8 belgi, kamida bitta harf va bitta raqamdan iborat bo‘lsin."
+        elif password != confirm:
+            error = "Ikki parol bir xil emas."
+        else:
+            c = get_db()
+            try:
+                c.execute(
+                    "INSERT INTO admin_akkauntlari(login,parol_hash,faol) VALUES(?,?,1)",
+                    (user, generate_password_hash(password)),
+                )
+                c.commit()
+            except sqlite3.IntegrityError:
+                c.rollback()
+                error = "Bu login avval ishlatilgan."
+            finally:
+                c.close()
+            if not error:
+                session.clear()
+                session["logged_in"] = True
+                session["user"] = user
+                log_action("admin_first_setup", f"user={user}")
+                return redirect(url_for("home"))
+    return render_template_string(ADMIN_SETUP_HTML, error=error)
+
+
 @app.route("/login", methods=["GET","POST"])
 def login():
+    if not _admin_is_configured():
+        return redirect(url_for("admin_setup"))
     error=''
     if request.method=='POST':
-        user=request.form.get('user','')
-        password=request.form.get('password','')
+        user=(request.form.get('user') or '').strip()
+        password=request.form.get('password') or ''
         locked, wait_sec = _is_login_locked(user)
+        account = _admin_account(user)
         if locked:
-            error=f'Juda ko‘p xato urinish. {wait_sec} soniyadan so‘ng qayta urinib ko‘ring.'
-        elif user==os.environ.get('PHARM_ERP_USER','admin') and password==_ADMIN_PASSWORD:
+            minutes = max(1, (wait_sec + 59) // 60)
+            error=f'Juda ko‘p xato urinish. Taxminan {minutes} daqiqadan so‘ng qayta urinib ko‘ring.'
+        elif account and int(account['faol'] or 0) == 1 and check_password_hash(account['parol_hash'], password):
             _clear_login_attempts(user)
+            session.clear()
             session['logged_in']=True
-            session['user']=user
-            log_action('admin_login', f'user={user}')
+            session['user']=account['login']
+            log_action('admin_login', f"user={account['login']}")
             return redirect(url_for('home'))
         else:
             _register_failed_login(user)
@@ -1185,7 +1267,10 @@ def login():
 
 @app.route("/logout")
 def logout():
-    session.clear(); return redirect(url_for('login'))
+    user = session.get("user", "")
+    log_action("admin_logout", f"user={user}")
+    session.clear()
+    return redirect(url_for('login'))
 
 
 @app.route("/")
@@ -1237,47 +1322,6 @@ def workers_add():
 def workers_delete(i):
     c=get_db(); c.execute("UPDATE ishchilar SET faol=0 WHERE id=?",(i,)); c.commit(); c.close()
     return jsonify({"status":"ok"})
-
-
-# ---------- ISHCHI AKKAUNTLARINI TASDIQLASH ----------
-@app.route("/api/ishchi-akkauntlari", methods=["GET"])
-def worker_accounts_get_api():
-    c=get_db()
-    rows=c.execute("""SELECT a.id,a.ishchi_id,a.telefon,a.login,a.tasdiqlangan,
-                      a.admin_tasdiq,a.faol,a.created_at,
-                      COALESCE(i.ism,'Noma’lum') AS ism,
-                      COALESCE(i.familiya,'') AS familiya,
-                      COALESCE(i.lavozim,'Ishchi') AS lavozim
-                      FROM ishchi_akkauntlari a
-                      LEFT JOIN ishchilar i ON i.id=a.ishchi_id
-                      ORDER BY CASE WHEN a.faol=1 AND a.admin_tasdiq=0 THEN 0 ELSE 1 END,
-                               a.id DESC""").fetchall()
-    c.close()
-    return jsonify([dict(r) for r in rows])
-
-
-@app.route("/api/ishchi-akkauntlari/<int:account_id>/tasdiqlash", methods=["POST"])
-def worker_account_approve_api(account_id):
-    c=get_db()
-    cur=c.execute("UPDATE ishchi_akkauntlari SET admin_tasdiq=1,faol=1 WHERE id=?",(account_id,))
-    if cur.rowcount == 0:
-        c.close()
-        return jsonify({"message":"Ishchi akkaunti topilmadi"}),404
-    c.commit(); c.close()
-    log_action('worker_approved', f'account_id={account_id}')
-    return jsonify({"status":"ok","message":"Ishchi tasdiqlandi"})
-
-
-@app.route("/api/ishchi-akkauntlari/<int:account_id>/bloklash", methods=["POST"])
-def worker_account_block_api(account_id):
-    c=get_db()
-    cur=c.execute("UPDATE ishchi_akkauntlari SET faol=0 WHERE id=?",(account_id,))
-    if cur.rowcount == 0:
-        c.close()
-        return jsonify({"message":"Ishchi akkaunti topilmadi"}),404
-    c.commit(); c.close()
-    log_action('worker_blocked', f'account_id={account_id}')
-    return jsonify({"status":"ok","message":"Ishchi akkaunti bloklandi"})
 
 
 # ---------- KELDI KETDI ----------
@@ -2193,7 +2237,7 @@ def worker_admin():
     if request.method=='POST':
         action=request.form.get('action')
         if action=='approve':
-            aid=int(request.form['account_id']); c.execute('UPDATE ishchi_akkauntlari SET admin_tasdiq=1,faol=1 WHERE id=?',(aid,)); log_action('worker_approved', f'account_id={aid}')
+            aid=int(request.form['account_id']); c.execute('UPDATE ishchi_akkauntlari SET admin_tasdiq=1 WHERE id=?',(aid,)); log_action('worker_approved', f'account_id={aid}')
         elif action=='block':
             aid=int(request.form['account_id']); c.execute('UPDATE ishchi_akkauntlari SET faol=0 WHERE id=?',(aid,)); log_action('worker_blocked', f'account_id={aid}')
         elif action=='task':
@@ -2391,9 +2435,14 @@ def pro_admin_page():
     return render_template_string(PRO_ADMIN_HTML,stats=stats,orders=orders)
 
 
+ADMIN_SETUP_HTML = r"""
+<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pharm Mebel - Birinchi xavfsiz sozlash</title><style>body{margin:0;background:linear-gradient(135deg,#0f1b33,#16a34a);font-family:Arial;display:grid;place-items:center;min-height:100vh}.box{background:#fff;padding:28px;border-radius:18px;width:min(410px,92%);box-shadow:0 20px 50px #0005}h2{margin-top:0}input{width:100%;padding:12px;margin:8px 0;border:1px solid #cbd5e1;border-radius:9px;box-sizing:border-box}button{width:100%;padding:12px;border:0;border-radius:9px;background:#16a34a;color:#fff;font-weight:700}.err{color:#b91c1c;font-size:13px}.note{font-size:13px;color:#475569;line-height:1.45}</style></head><body><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><h2>🔐 Birinchi xavfsiz sozlash</h2><p class="note">Admin login va parolini o‘zingiz belgilang. Parol bazaga faqat shifrlangan holatda saqlanadi va CMD oynasida ko‘rsatilmaydi.</p><input name="user" placeholder="Admin login" value="admin" minlength="3" required><input name="password" type="password" placeholder="Yangi parol" minlength="8" required><input name="confirm" type="password" placeholder="Parolni takrorlang" minlength="8" required><button>Admin akkauntini yaratish</button><div class="err">{{error}}</div></form></body></html>
+"""
+
 LOGIN_HTML = r"""
 <!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pharm Mebel - Kirish</title><style>body{margin:0;background:linear-gradient(135deg,#0f1b33,#2563eb);font-family:Arial;display:grid;place-items:center;min-height:100vh}.box{background:#fff;padding:28px;border-radius:18px;width:min(360px,92%);box-shadow:0 20px 50px #0005}h2{margin-top:0}input{width:100%;padding:12px;margin:8px 0;border:1px solid #cbd5e1;border-radius:9px;box-sizing:border-box}button{width:100%;padding:12px;border:0;border-radius:9px;background:#2563eb;color:#fff;font-weight:700}.err{color:#b91c1c;font-size:13px}</style></head><body><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><h2>🏭 Pharm Mebel</h2><input name="user" placeholder="Login" value="admin"><input name="password" type="password" placeholder="Parol"><button>Kirish</button><div class="err">{{error}}</div><p style="font-size:12px;color:#64748b">Parolni bilmasangiz, papkadagi <b>admin_parol.txt</b> faylini oching yoki konsol oynasidagi (CMD) chiqishga qarang.</p><hr><p style="text-align:center"><a href="/ishchi/login">👷 Ishchi kirishi</a> · <a href="/ishchi/royxat">Ro‘yxatdan o‘tish</a><br><a href="/shofyor/login">🚚 Shofyor kirishi</a> · <a href="/shofyor/royxat">Ro‘yxatdan o‘tish</a></p></form></body></html>
+<title>Pharm Mebel - Kirish</title><style>body{margin:0;background:linear-gradient(135deg,#0f1b33,#2563eb);font-family:Arial;display:grid;place-items:center;min-height:100vh}.box{background:#fff;padding:28px;border-radius:18px;width:min(360px,92%);box-shadow:0 20px 50px #0005}h2{margin-top:0}input{width:100%;padding:12px;margin:8px 0;border:1px solid #cbd5e1;border-radius:9px;box-sizing:border-box}button{width:100%;padding:12px;border:0;border-radius:9px;background:#2563eb;color:#fff;font-weight:700}.err{color:#b91c1c;font-size:13px}.safe{font-size:12px;color:#166534;background:#dcfce7;padding:9px;border-radius:8px}</style></head><body><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><h2>🏭 Pharm Mebel</h2><input name="user" placeholder="Login" value="admin" autocomplete="username"><input name="password" type="password" placeholder="Parol" autocomplete="current-password"><button>Kirish</button><div class="err">{{error}}</div><p class="safe">🔐 Admin paroli shifrlangan holda saqlanadi. Parol TXT faylga yozilmaydi va CMD oynasida ko‘rsatilmaydi.</p><hr><p style="text-align:center"><a href="/ishchi/login">👷 Ishchi kirishi</a> · <a href="/ishchi/royxat">Ro‘yxatdan o‘tish</a><br><a href="/shofyor/login">🚚 Shofyor kirishi</a> · <a href="/shofyor/royxat">Ro‘yxatdan o‘tish</a></p></form></body></html>
 """
 
 WORKER_BASE_STYLE = """
@@ -2488,7 +2537,6 @@ th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:no
   <div id="pharmDate" class="live-clock-date">Toshkent vaqti</div>
 </div>
 <div class="header-actions">
-  <a href="/ishchi-boshqaruv"><button style="background:#16a34a">👷 Ishchi tasdiqlash <span id="workerPendingBadge" style="display:none;margin-left:5px;background:#fff;color:#b91c1c;border-radius:999px;padding:2px 7px;font-size:11px"></span></button></a>
   <a href="/pro-boshqaruv"><button style="background:#0f766e">PRO boshqaruv</button></a>
   <a href="/shofyor-boshqaruv"><button style="background:#7c3aed">Shofyor boshqaruvi</button></a>
   <a href="/shartnoma-namuna"><button style="background:#0f766e">Shartnoma Word</button></a>
@@ -2548,16 +2596,7 @@ th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:no
 <label>Favqulodda aloqa telefoni<input name="favqulodda_telefon"></label>
 <label>Izoh<textarea name="izoh"></textarea></label><button>Saqlash</button><div class="msg"></div>
 </form></div><div class="panel tablewrap"><h3>Ishchilar</h3><table><thead><tr><th>Ism</th><th>Lavozim</th><th>Staj</th><th>Kunlik</th><th>Oylik</th><th></th></tr></thead><tbody id="workersBody"></tbody></table></div>
-</div>
-<div class="panel" style="margin-top:14px;overflow:auto">
-  <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
-    <div><h3 style="margin-bottom:4px">👷 Ishchi akkauntlarini tasdiqlash</h3><div style="font-size:12px;color:#64748b">Telefon orqali ro‘yxatdan o‘tgan ishchilar shu yerda chiqadi.</div></div>
-    <a href="/ishchi-boshqaruv" style="text-decoration:none"><button type="button" style="background:#0f766e">To‘liq ishchi boshqaruvi</button></a>
-  </div>
-  <div id="workerAccountsMsg" class="msg"></div>
-  <table style="margin-top:8px"><thead><tr><th>Ishchi</th><th>Telefon</th><th>Login</th><th>Holat</th><th>Amal</th></tr></thead><tbody id="workerAccountsBody"></tbody></table>
-</div>
-</section>
+</div></section>
 
 <section id="attendance" class="tab"><div class="grid"><div class="panel"><h3>Avtomatik keldi-ketdi</h3>
 <label>Ishchi<select class="workerSelect" id="autoWorkerSelect" required></select></label>
@@ -2747,35 +2786,6 @@ function money(v){return Number(v||0).toLocaleString('uz-UZ',{maximumFractionDig
 
 async function loadWorkers(){const a=await api('/api/ishchilar');$('#workersBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.lavozim||'')}</td><td>${esc(x.staj_yil)} yil</td><td>${money(x.kunlik_stavka)}</td><td>${money(x.oylik_maosh)}</td><td><button class="danger" onclick="delWorker(${esc(x.id)})">O‘chirish</button></td></tr>`).join('');$$('.workerSelect').forEach(s=>s.innerHTML='<option value="">Tanlang</option>'+a.map(x=>`<option value="${esc(x.id)}">${esc(x.ism)} ${esc(x.familiya||'')}</option>`).join(''))}
 async function delWorker(i){if(confirm('O‘chirasizmi?')){await api('/api/ishchilar/'+i,{method:'DELETE'});refresh()}}
-async function loadWorkerAccounts(){
-  const a=await api('/api/ishchi-akkauntlari');
-  const pending=a.filter(x=>Number(x.faol)===1&&Number(x.admin_tasdiq)===0).length;
-  const badge=$('#workerPendingBadge');
-  if(badge){badge.textContent=pending;badge.style.display=pending?'inline-block':'none'}
-  const body=$('#workerAccountsBody');
-  if(!body)return;
-  if(!a.length){body.innerHTML='<tr><td colspan="5" style="text-align:center;color:#64748b;padding:18px">Hozircha telefon orqali ro‘yxatdan o‘tgan ishchi yo‘q.</td></tr>';return}
-  body.innerHTML=a.map(x=>{
-    let status='✅ Tasdiqlangan';
-    if(Number(x.faol)===0)status='⛔ Bloklangan';
-    else if(Number(x.admin_tasdiq)===0)status='⏳ Kutilmoqda';
-    let actions='';
-    if(Number(x.admin_tasdiq)===0||Number(x.faol)===0){actions+=`<button class="ok" style="padding:6px 9px;margin-right:5px" onclick="approveWorkerAccount(${Number(x.id)})">${Number(x.faol)===0?'Faollashtirish':'Tasdiqlash'}</button>`}
-    if(Number(x.faol)===1){actions+=`<button class="danger" onclick="blockWorkerAccount(${Number(x.id)})">Bloklash</button>`}
-    return `<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.telefon||'-')}</td><td>${esc(x.login||'-')}</td><td>${status}</td><td>${actions}</td></tr>`
-  }).join('')
-}
-async function approveWorkerAccount(id){
-  const msg=$('#workerAccountsMsg');
-  try{const r=await api(`/api/ishchi-akkauntlari/${id}/tasdiqlash`,{method:'POST'});if(msg)msg.textContent='✅ '+(r.message||'Ishchi tasdiqlandi');await loadWorkerAccounts()}
-  catch(e){if(msg)msg.textContent='❌ '+e.message}
-}
-async function blockWorkerAccount(id){
-  if(!confirm('Ishchi akkauntini bloklaysizmi?'))return;
-  const msg=$('#workerAccountsMsg');
-  try{const r=await api(`/api/ishchi-akkauntlari/${id}/bloklash`,{method:'POST'});if(msg)msg.textContent='✅ '+(r.message||'Akkaunt bloklandi');await loadWorkerAccounts()}
-  catch(e){if(msg)msg.textContent='❌ '+e.message}
-}
 async function loadTypes(){const a=await api('/api/ish-turlari');$('#workTypeSelect').innerHTML=a.map(x=>`<option value="${esc(x.id)}">${esc(x.kategoriya)} — ${esc(x.nomi)} (${esc(x.birlik)})</option>`).join('')}
 async function loadAttendance(){const a=await api('/api/keldi-ketdi');$('#attendanceBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td>${esc(x.keldi_vaqti)}</td><td>${esc(x.ketdi_vaqti)}</td><td>${esc(x.ish_soatlari)}</td></tr>`).join('')}
 async function loadResults(){const a=await api('/api/natijalar');$('#resultsBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.ish_turi)}</td><td>${esc(x.sana)}</td><td>${esc(x.miqdor)} ${esc(x.birlik)}</td><td>${money(x.jami_haq)}</td><td>${esc(x.buyurtma_kodi||'')}</td></tr>`).join('')}
@@ -2809,7 +2819,7 @@ async function loadService(){const a=await api('/api/servis');$('#serviceBody').
 async function loadDelivery(){const a=await api('/api/yetkazish');$('#deliveryBody').innerHTML=a.map(x=>`<tr><td>${esc(x.sana)}</td><td>${esc(x.navbat)}</td><td>${esc(x.kod)}</td><td>${esc(x.mijoz)}</td><td>${esc(x.haydovchi_ism||'')} ${esc(x.haydovchi_familiya||'')}</td><td>${x.lokatsiya?`<a href="${esc(x.lokatsiya)}" target="_blank">Xarita</a>`:esc(x.manzil||'')}</td><td>${esc(x.holat)}</td><td><button onclick="deliveryState(${esc(x.id)},'Yo‘lga chiqdim')">Yo‘lga</button> <button class="ok" onclick="deliveryState(${esc(x.id)},'Yetkazib berdim')">Topshirildi</button></td></tr>`).join('')}
 async function deliveryState(id,holat){await api(`/api/yetkazish/${id}/holat`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({holat})});loadDelivery()}
 
-async function refresh(){await Promise.all([loadWorkers(),loadWorkerAccounts(),loadTypes(),loadAttendance(),loadResults(),loadOrders(),loadStock(),loadTrips(),loadPayments(),loadPenalties(),loadDashboard(),loadTotals(),loadExpenses(),loadBonuses(),loadStatuses(),loadFinished(),loadFinance(),loadProgress(),loadExtras(),loadService(),loadDelivery()])}
+async function refresh(){await Promise.all([loadWorkers(),loadTypes(),loadAttendance(),loadResults(),loadOrders(),loadStock(),loadTrips(),loadPayments(),loadPenalties(),loadDashboard(),loadTotals(),loadExpenses(),loadBonuses(),loadStatuses(),loadFinished(),loadFinance(),loadProgress(),loadExtras(),loadService(),loadDelivery()])}
 const rf=$('#ratingForm');rf.onsubmit=async e=>{e.preventDefault();const d=fj(rf),id=d.buyurtma_id;delete d.buyurtma_id;const m=rf.querySelector('.msg');try{await api(`/api/buyurtma/${id}/baho`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});m.textContent='✅ Baho saqlandi'}catch(x){m.textContent='❌ '+x.message}};
 bind('#extraForm','/api/qoshimcha-ish');bind('#serviceForm','/api/servis');bind('#deliveryForm','/api/yetkazish');
 bind('#workerForm','/api/ishchilar');bind('#attendanceForm','/api/keldi-ketdi');bind('#resultForm','/api/natijalar');bind('#orderForm','/api/buyurtmalar');bind('#stockForm','/api/ombor-harakat');bind('#tripForm','/api/safarlar');bind('#paymentForm','/api/tolovlar');bind('#penaltyForm','/api/jarimalar');bind('#expenseForm','/api/xarajatlar');bind('#bonusForm','/api/bonuslar');bind('#statusForm','/api/ishchi-holatlari');bind('#finishedForm','/api/tayyor-mahsulot');setMonth();$('#finStart').value=$('#totalStart').value;$('#finEnd').value=$('#totalEnd').value;refresh();
