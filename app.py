@@ -2437,13 +2437,209 @@ def pro_admin_page():
 
 ADMIN_SETUP_HTML = r"""
 <!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pharm Mebel - Birinchi xavfsiz sozlash</title><style>body{margin:0;background:linear-gradient(135deg,#0f1b33,#16a34a);font-family:Arial;display:grid;place-items:center;min-height:100vh}.box{background:#fff;padding:28px;border-radius:18px;width:min(410px,92%);box-shadow:0 20px 50px #0005}h2{margin-top:0}input{width:100%;padding:12px;margin:8px 0;border:1px solid #cbd5e1;border-radius:9px;box-sizing:border-box}button{width:100%;padding:12px;border:0;border-radius:9px;background:#16a34a;color:#fff;font-weight:700}.err{color:#b91c1c;font-size:13px}.note{font-size:13px;color:#475569;line-height:1.45}</style></head><body><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><h2>🔐 Birinchi xavfsiz sozlash</h2><p class="note">Admin login va parolini o‘zingiz belgilang. Parol bazaga faqat shifrlangan holatda saqlanadi va CMD oynasida ko‘rsatilmaydi.</p><input name="user" placeholder="Admin login" value="admin" minlength="3" required><input name="password" type="password" placeholder="Yangi parol" minlength="8" required><input name="confirm" type="password" placeholder="Parolni takrorlang" minlength="8" required><button>Admin akkauntini yaratish</button><div class="err">{{error}}</div></form></body></html>
+<title>Pharm Mebel - Birinchi xavfsiz sozlash</title><style>body{margin:0;background:linear-gradient(135deg,#0f1b33,#16a34a);font-family:Arial;display:grid;place-items:center;min-height:100vh}.box{background:#fff;padding:28px;border-radius:18px;width:min(410px,92%);box-shadow:0 20px 50px #0005}h2{margin-top:0}input{width:100%;padding:12px;margin:8px 0;border:1px solid #cbd5e1;border-radius:9px;box-sizing:border-box}button{width:100%;padding:12px;border:0;border-radius:9px;background:#16a34a;color:#fff;font-weight:700}.err{color:#b91c1c;font-size:13px}.note{font-size:13px;color:#475569;line-height:1.45}</style></head><body><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><h2>🔐 Birinchi xavfsiz sozlash</h2><input name="user" placeholder="Admin login" value="admin" minlength="3" required><input name="password" type="password" placeholder="Yangi parol" minlength="8" required><input name="confirm" type="password" placeholder="Parolni takrorlang" minlength="8" required><button>Admin akkauntini yaratish</button><div class="err">{{error}}</div></form></body></html>
 """
 
 LOGIN_HTML = r"""
-<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pharm Mebel - Kirish</title><style>body{margin:0;background:linear-gradient(135deg,#0f1b33,#2563eb);font-family:Arial;display:grid;place-items:center;min-height:100vh}.box{background:#fff;padding:28px;border-radius:18px;width:min(360px,92%);box-shadow:0 20px 50px #0005}h2{margin-top:0}input{width:100%;padding:12px;margin:8px 0;border:1px solid #cbd5e1;border-radius:9px;box-sizing:border-box}button{width:100%;padding:12px;border:0;border-radius:9px;background:#2563eb;color:#fff;font-weight:700}.err{color:#b91c1c;font-size:13px}.safe{font-size:12px;color:#166534;background:#dcfce7;padding:9px;border-radius:8px}</style></head><body><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><h2>🏭 Pharm Mebel</h2><input name="user" placeholder="Login" value="admin" autocomplete="username"><input name="password" type="password" placeholder="Parol" autocomplete="current-password"><button>Kirish</button><div class="err">{{error}}</div><p class="safe">🔐 Admin paroli shifrlangan holda saqlanadi. Parol TXT faylga yozilmaydi va CMD oynasida ko‘rsatilmaydi.</p><hr><p style="text-align:center"><a href="/ishchi/login">👷 Ishchi kirishi</a> · <a href="/ishchi/royxat">Ro‘yxatdan o‘tish</a><br><a href="/shofyor/login">🚚 Shofyor kirishi</a> · <a href="/shofyor/royxat">Ro‘yxatdan o‘tish</a></p></form></body></html>
+<!doctype html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pharm Mebel — Rahbar kirishi</title>
+<style>
+:root{
+  --navy:#0b1736;
+  --blue:#2563eb;
+  --blue2:#38bdf8;
+  --green:#16a34a;
+  --text:#172033;
+  --muted:#64748b;
+  --line:#dbe5f0;
+  --danger:#b91c1c;
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;font-family:Arial,Helvetica,sans-serif;color:var(--text)}
+body{
+  min-height:100vh;
+  display:grid;
+  place-items:center;
+  padding:24px;
+  background:
+    radial-gradient(circle at 12% 16%,rgba(56,189,248,.28),transparent 31%),
+    radial-gradient(circle at 88% 82%,rgba(37,99,235,.30),transparent 34%),
+    linear-gradient(145deg,#07142f 0%,#123b8f 50%,#0b5fa8 100%);
+  overflow-x:hidden;
+}
+body:before,body:after{
+  content:"";position:fixed;border-radius:999px;filter:blur(2px);pointer-events:none;
+  background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12)
+}
+body:before{width:320px;height:320px;left:-100px;bottom:-120px}
+body:after{width:230px;height:230px;right:-65px;top:-60px}
+.login-shell{
+  width:min(900px,100%);
+  display:grid;
+  grid-template-columns:1.05fr .95fr;
+  border:1px solid rgba(255,255,255,.22);
+  border-radius:28px;
+  overflow:hidden;
+  background:rgba(255,255,255,.96);
+  box-shadow:0 32px 90px rgba(2,8,23,.38);
+  animation:show .55s ease both;
+}
+.brand-panel{
+  position:relative;
+  min-height:560px;
+  padding:48px 42px;
+  display:flex;
+  flex-direction:column;
+  justify-content:space-between;
+  color:#fff;
+  background:
+    radial-gradient(circle at 78% 20%,rgba(56,189,248,.34),transparent 30%),
+    linear-gradient(150deg,#0b1736,#154aa8 62%,#0784c8);
+  overflow:hidden;
+}
+.brand-panel:after{
+  content:"360°";
+  position:absolute;
+  right:-18px;
+  bottom:18px;
+  font-size:132px;
+  line-height:1;
+  font-weight:900;
+  color:rgba(255,255,255,.055);
+  letter-spacing:-10px;
+}
+.brand-top{position:relative;z-index:1}
+.logo-mark{
+  width:66px;height:66px;border-radius:20px;
+  display:grid;place-items:center;
+  background:linear-gradient(145deg,#fff,#dbeafe);
+  color:#154aa8;font-size:31px;font-weight:900;
+  box-shadow:0 15px 35px rgba(2,8,23,.25)
+}
+.brand-title{margin:28px 0 8px;font-size:42px;line-height:1.05;font-weight:900;letter-spacing:-1px}
+.brand-sub{font-size:18px;line-height:1.55;color:#dbeafe;max-width:390px}
+.brand-features{position:relative;z-index:1;display:grid;gap:11px;margin-top:28px}
+.feature{display:flex;align-items:center;gap:10px;font-size:14px;color:#e0f2fe}
+.feature i{width:27px;height:27px;border-radius:9px;display:grid;place-items:center;background:rgba(255,255,255,.13);font-style:normal}
+.form-panel{padding:48px 44px;display:flex;align-items:center;background:#fff}
+.form-wrap{width:100%;max-width:360px;margin:auto}
+.role-badge{display:inline-flex;align-items:center;gap:7px;padding:7px 11px;border-radius:999px;background:#eff6ff;color:#1d4ed8;font-size:12px;font-weight:800}
+h1{font-size:30px;margin:17px 0 7px;letter-spacing:-.5px}
+.intro{margin:0 0 25px;color:var(--muted);font-size:14px;line-height:1.5}
+label{display:block;margin:13px 0 6px;font-size:13px;font-weight:800;color:#334155}
+.field{position:relative}
+.field input{
+  width:100%;height:50px;padding:0 46px 0 43px;
+  border:1px solid var(--line);border-radius:13px;
+  background:#f8fafc;color:#0f172a;font-size:15px;outline:none;
+  transition:.18s ease;
+}
+.field input:focus{border-color:#60a5fa;background:#fff;box-shadow:0 0 0 4px rgba(37,99,235,.11)}
+.field-icon{position:absolute;left:15px;top:50%;transform:translateY(-50%);font-size:17px;opacity:.72}
+.show-pass{position:absolute;right:8px;top:50%;transform:translateY(-50%);border:0;background:transparent;color:#475569;font-size:12px;font-weight:800;padding:8px;cursor:pointer}
+.login-btn{
+  width:100%;height:51px;margin-top:20px;border:0;border-radius:13px;
+  color:#fff;font-size:15px;font-weight:900;cursor:pointer;
+  background:linear-gradient(100deg,#2563eb,#0284c7);
+  box-shadow:0 13px 28px rgba(37,99,235,.25);
+  transition:.18s ease;
+}
+.login-btn:hover{transform:translateY(-1px);box-shadow:0 16px 32px rgba(37,99,235,.30)}
+.login-btn:active{transform:translateY(0)}
+.error-box{margin-top:13px;padding:10px 12px;border-radius:10px;background:#fef2f2;color:var(--danger);font-size:13px;font-weight:700;border:1px solid #fecaca}
+.other-title{display:flex;align-items:center;gap:10px;margin:24px 0 13px;color:#94a3b8;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.8px}
+.other-title:before,.other-title:after{content:"";height:1px;background:#e2e8f0;flex:1}
+.role-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.role-link{
+  min-height:67px;padding:10px;border:1px solid #e2e8f0;border-radius:13px;
+  text-decoration:none;color:#334155;background:#f8fafc;
+  display:flex;align-items:center;gap:9px;transition:.18s ease
+}
+.role-link:hover{border-color:#93c5fd;background:#eff6ff;transform:translateY(-1px)}
+.role-icon{width:35px;height:35px;border-radius:10px;display:grid;place-items:center;background:#dbeafe;font-size:17px;flex:none}
+.role-link.driver .role-icon{background:#dcfce7}
+.role-link b{display:block;font-size:12px}.role-link small{display:block;color:#64748b;font-size:10px;margin-top:3px}
+.footer-note{text-align:center;color:#94a3b8;font-size:11px;margin-top:18px}
+@keyframes show{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
+@media(max-width:760px){
+  body{padding:13px;display:block}
+  .login-shell{grid-template-columns:1fr;max-width:480px;margin:12px auto;border-radius:22px}
+  .brand-panel{min-height:auto;padding:26px 25px 24px}
+  .brand-title{font-size:29px;margin-top:18px}.brand-sub{font-size:14px}
+  .brand-features{display:none}.brand-panel:after{font-size:85px;bottom:-5px}
+  .logo-mark{width:52px;height:52px;border-radius:16px;font-size:24px}
+  .form-panel{padding:29px 22px 25px}
+  h1{font-size:26px}.role-grid{grid-template-columns:1fr 1fr}
+}
+@media(max-width:390px){.role-grid{grid-template-columns:1fr}.role-link{min-height:58px}}
+</style>
+</head>
+<body>
+<main class="login-shell">
+  <section class="brand-panel">
+    <div class="brand-top">
+      <div class="logo-mark">M</div>
+      <div class="brand-title">Pharm Mebel</div>
+      <div class="brand-sub">Korxona, buyurtmalar, ishchilar va omborni yagona tizimda boshqaring.</div>
+    </div>
+    <div class="brand-features">
+      <div class="feature"><i>✓</i><span>Buyurtmalar va ishlab chiqarish nazorati</span></div>
+      <div class="feature"><i>✓</i><span>Ishchi, Shofyor va Mijoz kabinetlari</span></div>
+      <div class="feature"><i>✓</i><span>Ombor, xarajat va hisobotlar</span></div>
+    </div>
+  </section>
+
+  <section class="form-panel">
+    <form class="form-wrap" method="post">
+      <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
+      <span class="role-badge">◆ Rahbar kabineti</span>
+      <h1>Xush kelibsiz</h1>
+      <p class="intro">Dastur boshqaruv paneliga kirish uchun login va parolingizni kiriting.</p>
+
+      <label for="user">Login</label>
+      <div class="field">
+        <span class="field-icon">👤</span>
+        <input id="user" name="user" placeholder="Login" value="admin" autocomplete="username" required autofocus>
+      </div>
+
+      <label for="password">Parol</label>
+      <div class="field">
+        <span class="field-icon">🔑</span>
+        <input id="password" name="password" type="password" placeholder="Parol" autocomplete="current-password" required>
+        <button class="show-pass" type="button" onclick="togglePassword()" id="showPassword">Ko‘rsatish</button>
+      </div>
+
+      <button class="login-btn" type="submit">Kirish →</button>
+      {% if error %}<div class="error-box">⚠ {{error}}</div>{% endif %}
+
+      <div class="other-title">Boshqa kabinetlar</div>
+      <div class="role-grid">
+        <a class="role-link" href="/ishchi/login"><span class="role-icon">👷</span><span><b>Ishchi kirishi</b><small>Kabinetga kirish</small></span></a>
+        <a class="role-link" href="/ishchi/royxat"><span class="role-icon">＋</span><span><b>Ishchi ro‘yxati</b><small>Yangi akkaunt</small></span></a>
+        <a class="role-link driver" href="/shofyor/login"><span class="role-icon">🚚</span><span><b>Shofyor kirishi</b><small>Kabinetga kirish</small></span></a>
+        <a class="role-link driver" href="/shofyor/royxat"><span class="role-icon">＋</span><span><b>Shofyor ro‘yxati</b><small>Yangi akkaunt</small></span></a>
+      </div>
+      <div class="footer-note">Mebel360° boshqaruv tizimi</div>
+    </form>
+  </section>
+</main>
+<script>
+function togglePassword(){
+  const input=document.getElementById('password');
+  const button=document.getElementById('showPassword');
+  const visible=input.type==='text';
+  input.type=visible?'password':'text';
+  button.textContent=visible?'Ko‘rsatish':'Yashirish';
+}
+</script>
+</body>
+</html>
 """
+
 
 WORKER_BASE_STYLE = """
 <style>
