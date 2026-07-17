@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Mebel360 - Konstruktor Kroy demo moduli.
+"""Mebel360 Boshqaruv Pro V9.
 
-Imkoniyatlar:
-- Konstruktor detal ro'yxatini qo'lda kiritadi yoki eski 2D-PLACE DBF faylidan yuklaydi.
-- Kromka tomonlari: chap, o'ng, tepa, past va 1.1 zaxira koeffitsiyenti bilan jonli metr hisobi.
-- Gul/tekstura yo'nalishi uchun aylantirish mumkin yoki taqiqlanadi.
-- 60/120/240 tagacha variantni tekshiradigan guillotine kroy va katta qoldiq optimallashtirish.
-- Ishchiga maxfiy havola yuborish.
-- Telefon/planshet uchun SVG ko'rinish.
-- Ishchi oynasidan printerga chiqarish va A4 PDF: bir betga 2 ta kroy list.
+Asosiy imkoniyatlar:
+- Zamonaviy Rahbar, Konstruktor, Menejer, Ishchi va Shafyor bo'limlari.
+- Har bir xodim uchun alohida shifrlangan login-parol va rol bo'yicha kirish.
+- Konstruktor: DBF/CSV/TXT, PRO100 STO, kroy, kromka x1.1 va A4 PDF.
+- Ishchi “Kroy kesildi” yoki “Kromka tayyor”ni belgilasa, mijoz kuzatuvi avtomatik yangilanadi.
+- Mijoz uchun maxfiy havola, jonli tayyorlik foizi va buyurtma yangiliklari.
+- Shafyor: “Yetkazishga tayyor”, “Yo'lda”, “Yetkazildi” holatlari va mijozga avtomatik xabar.
+- SQLite baza, kunlik zaxira nusxa, CSRF himoyasi va login bloklash.
 
 Ishga tushirish:
     pip install -r requirements.txt
@@ -79,6 +79,22 @@ OPTIMIZATION_LABELS = {
     "full": "Standart - 120 variantgacha",
     "large": "Chuqur - 240 variantgacha",
 }
+
+ROLE_LABELS = {
+    "admin": "Rahbar",
+    "constructor": "Konstruktor",
+    "manager": "Menejer",
+    "worker": "Ishchi",
+    "driver": "Shafyor",
+}
+ROLE_HOME_ENDPOINTS = {
+    "admin": "dashboard",
+    "constructor": "constructor",
+    "manager": "manager_dashboard",
+    "worker": "worker_center",
+    "driver": "driver_dashboard",
+}
+DELIVERY_STATUSES = ("Kutilmoqda", "Yetkazishga tayyor", "Yo'lda", "Yetkazildi")
 
 
 def optimization_label(mode: str) -> str:
@@ -390,6 +406,17 @@ button,.btn{box-shadow:0 5px 14px #2563eb22;transition:transform .13s ease,filte
 .attachment{display:flex;align-items:center;justify-content:space-between;gap:10px;border:1px solid #dbe2ea;border-radius:10px;padding:9px 10px;background:#f8fafc;margin-top:8px}.attachment-name{font-weight:700}.attachment-meta{font-size:11px;color:#64748b}
 .empty{background:#f8fafc}.tablewrap{border:1px solid #eef2f7;border-radius:10px}th{background:#f8fafc;color:#334155;text-transform:none}
 @media(max-width:760px){.hero-grid{display:block}.hero-actions{margin-top:14px}.import-grid{grid-template-columns:1fr}.hero h1{font-size:22px}.grid{gap:8px}.top-actions .small{display:none}}
+
+/* Mebel360 Pro V9 — rollar va mijoz kuzatuvi */
+.navbar{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.navlink{display:inline-flex;align-items:center;gap:6px;padding:8px 10px;border-radius:10px;color:#e2e8f0;text-decoration:none;font-size:12px;font-weight:800;border:1px solid transparent}.navlink:hover{background:#ffffff12;border-color:#ffffff1f}.navlink.active{background:#ffffff18;color:#fff}.role-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 9px;border-radius:999px;background:#0ea5e922;border:1px solid #38bdf84d;color:#bae6fd;font-size:11px;font-weight:800}
+.dashboard-hero{background:linear-gradient(135deg,#0f172a,#1d4ed8 52%,#0f766e);color:#fff;border:0;padding:26px}.dashboard-hero h1{font-size:30px;margin:0 0 7px}.dashboard-hero p{margin:0;color:#dbeafe;max-width:850px}.role-grid{display:grid;grid-template-columns:repeat(4,minmax(210px,1fr));gap:14px;margin:14px 0}.role-card{position:relative;overflow:hidden;display:block;background:#fff;border:1px solid #e2e8f0;border-radius:18px;padding:18px;text-decoration:none;color:#172033;box-shadow:0 14px 35px #0f172a0d;transition:.18s}.role-card:hover{transform:translateY(-3px);box-shadow:0 18px 42px #0f172a18}.role-card:after{content:"";position:absolute;width:105px;height:105px;border-radius:50%;right:-42px;top:-44px;background:linear-gradient(135deg,#60a5fa33,#22c55e33)}.role-icon{display:flex;align-items:center;justify-content:center;width:48px;height:48px;border-radius:14px;background:linear-gradient(135deg,#dbeafe,#dcfce7);font-size:24px;margin-bottom:12px}.role-card h3{margin:0 0 5px;font-size:18px}.role-card p{margin:0;color:#64748b;font-size:12px;line-height:1.45}.role-arrow{margin-top:13px;font-weight:800;color:#2563eb;font-size:12px}
+.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.kpi{padding:15px;border-radius:15px;background:linear-gradient(180deg,#fff,#f8fafc);border:1px solid #e2e8f0}.kpi b{display:block;font-size:25px;letter-spacing:-1px}.kpi span{font-size:11px;color:#64748b;font-weight:700}
+.progress-track{height:10px;background:#e2e8f0;border-radius:999px;overflow:hidden;min-width:100px}.progress-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,#2563eb,#10b981);transition:width .3s}.progress-label{font-size:11px;font-weight:800;color:#334155;margin-top:4px}.order-card{border:1px solid #e2e8f0;border-radius:15px;padding:13px;background:#fff;margin-bottom:10px}.order-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.order-code{font-size:17px;font-weight:900}.split-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}.copy-box{display:flex;gap:6px;align-items:center}.copy-box input{margin:0;font-size:11px}.copy-box button{white-space:nowrap}
+.customer-shell{max-width:760px;margin:12px auto}.customer-top{position:relative;overflow:hidden;background:linear-gradient(135deg,#0f172a,#1e40af 55%,#0f766e);color:#fff;border-radius:22px;padding:24px;box-shadow:0 20px 50px #0f172a22}.customer-top:after{content:"360°";position:absolute;right:-12px;top:-22px;font-size:110px;font-weight:900;color:#ffffff0b}.customer-code{font-size:13px;color:#bfdbfe;font-weight:800}.customer-title{font-size:28px;font-weight:900;margin:4px 0}.customer-stage{font-size:14px;color:#dbeafe}.customer-progress{margin-top:18px}.customer-progress .progress-track{height:14px;background:#ffffff2b}.customer-progress .progress-fill{background:linear-gradient(90deg,#38bdf8,#4ade80)}.customer-progress-row{display:flex;justify-content:space-between;margin-bottom:6px;font-weight:800}.timeline{position:relative;margin:6px 0}.timeline-item{position:relative;padding:4px 0 16px 34px}.timeline-item:before{content:"";position:absolute;left:10px;top:7px;width:12px;height:12px;border-radius:50%;background:#10b981;box-shadow:0 0 0 5px #d1fae5}.timeline-item:after{content:"";position:absolute;left:15px;top:23px;bottom:-2px;width:2px;background:#dbe2ea}.timeline-item:last-child:after{display:none}.timeline-title{font-weight:900}.timeline-time{font-size:11px;color:#64748b;margin-top:2px}.timeline-message{font-size:12px;color:#475569;margin-top:3px;line-height:1.45}.stage-list{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:12px}.stage-step{padding:9px 6px;text-align:center;border-radius:11px;background:#f1f5f9;color:#64748b;font-size:10px;font-weight:800;border:1px solid #e2e8f0}.stage-step.done{background:#ecfdf5;color:#047857;border-color:#a7f3d0}.stage-step.current{background:#eff6ff;color:#1d4ed8;border-color:#bfdbfe}.auto-note{font-size:11px;color:#64748b;text-align:center;margin-top:10px}
+.notice-preview{padding:14px;border-radius:14px;background:linear-gradient(135deg,#eff6ff,#ecfdf5);border:1px solid #bfdbfe}.notice-preview b{color:#1e40af}.delivery-buttons{display:flex;gap:6px;flex-wrap:wrap}.delivery-buttons form{margin:0}.delivery-status{font-weight:900}.delivery-status.road{color:#d97706}.delivery-status.done{color:#059669}.mini-form{padding:12px;border-radius:13px;background:#f8fafc;border:1px solid #e2e8f0}.user-grid{display:grid;grid-template-columns:360px 1fr;gap:14px}
+@media(max-width:1050px){.role-grid{grid-template-columns:repeat(2,1fr)}.split-grid,.user-grid{grid-template-columns:1fr}.kpi-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:600px){.navbar{display:none}.role-grid{grid-template-columns:1fr}.kpi-grid{grid-template-columns:1fr 1fr}.dashboard-hero{padding:19px}.dashboard-hero h1{font-size:23px}.customer-title{font-size:23px}.stage-list{grid-template-columns:1fr}.stage-step{text-align:left}.copy-box{display:block}.copy-box button{margin-top:6px;width:100%}}
+
 @media print{
 @page{size:A4 portrait;margin:8mm}
 html,body{background:#fff}
@@ -547,6 +574,18 @@ def init_db() -> None:
             created_at TEXT NOT NULL,
             FOREIGN KEY(job_id) REFERENCES kroy_jobs(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS customer_updates(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            event_key TEXT NOT NULL,
+            title TEXT NOT NULL,
+            message TEXT DEFAULT '',
+            stage TEXT DEFAULT '',
+            progress INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(job_id) REFERENCES kroy_jobs(id) ON DELETE CASCADE,
+            UNIQUE(job_id,event_key)
+        );
         """
     )
     columns = {row[1] for row in conn.execute("PRAGMA table_info(kroy_jobs)").fetchall()}
@@ -561,6 +600,19 @@ def init_db() -> None:
     if "worker_token_created_at" not in columns:
         conn.execute("ALTER TABLE kroy_jobs ADD COLUMN worker_token_created_at TEXT DEFAULT ''")
         conn.execute("UPDATE kroy_jobs SET worker_token_created_at=COALESCE(NULLIF(sent_at,''),created_at)")
+    if "customer_token" not in columns:
+        conn.execute("ALTER TABLE kroy_jobs ADD COLUMN customer_token TEXT DEFAULT ''")
+    if "customer_link_active" not in columns:
+        conn.execute("ALTER TABLE kroy_jobs ADD COLUMN customer_link_active INTEGER DEFAULT 1")
+    if "delivery_status" not in columns:
+        conn.execute("ALTER TABLE kroy_jobs ADD COLUMN delivery_status TEXT DEFAULT 'Kutilmoqda'")
+    if "delivery_note" not in columns:
+        conn.execute("ALTER TABLE kroy_jobs ADD COLUMN delivery_note TEXT DEFAULT ''")
+    if "delivered_at" not in columns:
+        conn.execute("ALTER TABLE kroy_jobs ADD COLUMN delivered_at TEXT DEFAULT ''")
+    for row in conn.execute("SELECT id FROM kroy_jobs WHERE COALESCE(customer_token,'')='' ").fetchall():
+        conn.execute("UPDATE kroy_jobs SET customer_token=? WHERE id=?", (secrets.token_urlsafe(24), row["id"]))
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_kroy_jobs_customer_token ON kroy_jobs(customer_token)")
     conn.commit()
     conn.close()
 
@@ -1056,6 +1108,87 @@ def dict_to_plan(data: dict[str, Any]) -> SheetPlan:
     )
 
 
+
+def _add_customer_update(
+    conn: sqlite3.Connection,
+    job_id: int,
+    event_key: str,
+    title: str,
+    message: str = "",
+    stage: str = "",
+    progress: int = 0,
+) -> bool:
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO customer_updates(job_id,event_key,title,message,stage,progress,created_at)
+           VALUES(?,?,?,?,?,?,?)""",
+        (job_id, event_key[:120], title[:140], message[:500], stage[:80], max(0, min(100, int(progress))), now_iso()),
+    )
+    return cur.rowcount == 1
+
+
+def _job_progress_from_counts(total: int, cuts: int, edges: int, delivery_status: str = "Kutilmoqda") -> int:
+    if total <= 0:
+        base = 0
+    else:
+        base = round(((cuts + edges) / (total * 2)) * 80)
+    if delivery_status == "Yetkazishga tayyor":
+        return max(base, 85)
+    if delivery_status == "Yo'lda":
+        return max(base, 95)
+    if delivery_status == "Yetkazildi":
+        return 100
+    return min(80, base)
+
+
+def _progress_snapshot(conn: sqlite3.Connection, job_id: int) -> dict[str, Any]:
+    stats = conn.execute(
+        """SELECT COUNT(*) total,COALESCE(SUM(cut_done),0) cuts,COALESCE(SUM(edge_done),0) edges
+           FROM kroy_sheets WHERE job_id=?""",
+        (job_id,),
+    ).fetchone()
+    job = conn.execute("SELECT status,delivery_status FROM kroy_jobs WHERE id=?", (job_id,)).fetchone()
+    total = int(stats["total"] or 0)
+    cuts = int(stats["cuts"] or 0)
+    edges = int(stats["edges"] or 0)
+    delivery = (job["delivery_status"] if job else "Kutilmoqda") or "Kutilmoqda"
+    progress = _job_progress_from_counts(total, cuts, edges, delivery)
+    if delivery == "Yetkazildi":
+        stage = "Buyurtma yetkazildi"
+    elif delivery == "Yo'lda":
+        stage = "Buyurtma yo'lda"
+    elif delivery == "Yetkazishga tayyor":
+        stage = "Yetkazishga tayyor"
+    elif total and edges == total:
+        stage = "Kroy va kromka tayyor"
+    elif cuts:
+        stage = "Kromka ishlari davom etmoqda" if total and cuts == total else "Kroy ishlari davom etmoqda"
+    else:
+        stage = "Buyurtma qabul qilindi"
+    return {"total": total, "cuts": cuts, "edges": edges, "progress": progress, "stage": stage, "delivery_status": delivery}
+
+
+def _customer_stages(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    total = int(snapshot["total"] or 0)
+    cuts = int(snapshot["cuts"] or 0)
+    edges = int(snapshot["edges"] or 0)
+    delivery = snapshot["delivery_status"]
+    flags = [
+        ("Buyurtma", True),
+        ("Kroy", bool(total and cuts == total)),
+        ("Kromka", bool(total and edges == total)),
+        ("Yo'lda", delivery in {"Yo'lda", "Yetkazildi"}),
+        ("Yetkazildi", delivery == "Yetkazildi"),
+    ]
+    result = []
+    current_used = False
+    for name, done in flags:
+        state = "done" if done else ""
+        if not done and not current_used:
+            state = "current"
+            current_used = True
+        result.append({"name": name, "state": state})
+    return result
+
 def save_job(meta: dict[str, Any], parts: list[Part], plans: list[SheetPlan]) -> tuple[int, str]:
     token = secrets.token_urlsafe(24)
     now = now_iso()
@@ -1072,6 +1205,16 @@ def save_job(meta: dict[str, Any], parts: list[Part], plans: list[SheetPlan]) ->
         ),
     )
     job_id = int(cur.lastrowid)
+    customer_token = secrets.token_urlsafe(24)
+    conn.execute(
+        "UPDATE kroy_jobs SET customer_token=?,customer_link_active=1,delivery_status='Kutilmoqda' WHERE id=?",
+        (customer_token, job_id),
+    )
+    _add_customer_update(
+        conn, job_id, "order-created", "Buyurtma qabul qilindi",
+        f"{meta['order_code']} buyurtmasi tizimga kiritildi va konstruktor ishiga yuborildi.",
+        "Buyurtma", 0,
+    )
     conn.executemany(
         """INSERT INTO kroy_parts(job_id,uid,name,length,width,qty,rotate,edge_left,edge_right,edge_top,edge_bottom)
            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
@@ -1316,7 +1459,8 @@ def build_pdf(job: sqlite3.Row, sheets: list[tuple[sqlite3.Row, SheetPlan]]) -> 
 
 BASE_TEMPLATE = r"""
 <!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ title }}</title><style>""" + BASE_CSS + r"""</style></head>
-<body><header><div class="top"><div><div class="brand"><span class="brand-mark">360°</span>Mebel360° <span class="module-pill">KONSTRUKTOR PRO V8</span></div><div class="sub">Aniq kroy · kromka hisobi · ishchi nazorati · xavfsiz saqlash</div></div><div class="top-actions no-print">{% if session.get('admin_user_id') %}<span class="small">{{ session.get('admin_username','Admin') }}</span><a class="btn light" href="{{ url_for('constructor') }}">Bosh sahifa</a><form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="btn2" type="submit">Chiqish</button></form>{% else %}<a class="btn light" href="{{ url_for('login') }}">Kirish</a>{% endif %}</div></div></header>
+<body><header><div class="top"><div><div class="brand"><span class="brand-mark">360°</span>Mebel360° <span class="module-pill">BOSHQARUV PRO V9</span></div><div class="sub">Konstruktor · menejer · ishchi · shafyor · mijoz kuzatuvi</div></div>
+{% if session.get('admin_user_id') %}<div class="navbar no-print"><a class="navlink" href="{{ url_for('dashboard') }}">Boshqaruv</a>{% if session.get('user_role') in ['admin','constructor'] %}<a class="navlink" href="{{ url_for('constructor') }}">Konstruktor</a>{% endif %}{% if session.get('user_role') in ['admin','manager'] %}<a class="navlink" href="{{ url_for('manager_dashboard') }}">Menejer</a>{% endif %}{% if session.get('user_role') in ['admin','manager','constructor','worker'] %}<a class="navlink" href="{{ url_for('worker_center') }}">Ishchi</a>{% endif %}{% if session.get('user_role') in ['admin','manager','driver'] %}<a class="navlink" href="{{ url_for('driver_dashboard') }}">Shafyor</a>{% endif %}{% if session.get('user_role')=='admin' %}<a class="navlink" href="{{ url_for('users') }}">Xodimlar</a>{% endif %}<span class="role-chip">{{ role_labels.get(session.get('user_role','admin'),'Rahbar') }} · {{ session.get('admin_username','') }}</span><form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="btn2" type="submit">Chiqish</button></form></div>{% else %}<div class="top-actions no-print"><a class="btn light" href="{{ url_for('login') }}">Kirish</a></div>{% endif %}</div></header>
 <div class="wrap">{% with msgs=get_flashed_messages(with_categories=true) %}{% for cat,msg in msgs %}<div class="flash {{ 'bad' if cat=='bad' else '' }}">{{ msg }}</div>{% endfor %}{% endwith %}{{ body|safe }}</div></body></html>
 """
 
@@ -1326,20 +1470,20 @@ AUTH_BODY = r"""
   <div class="panel">
     {% if setup %}
       <h2>Birinchi xavfsiz sozlash</h2>
-      <div class="auth-note">Admin paroli TXT faylga yozilmaydi va CMD oynasida ko'rsatilmaydi. U bazada faqat shifrlangan holatda saqlanadi.</div>
+      <div class="auth-note">Rahbar paroli TXT faylga yozilmaydi va CMD oynasida ko'rsatilmaydi. U bazada faqat shifrlangan holatda saqlanadi.</div>
       <form method="post" action="{{ url_for('setup') }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-        <label>Admin login<input name="username" value="admin" minlength="3" maxlength="40" autocomplete="username" required></label>
+        <label>Rahbar login<input name="username" value="admin" minlength="3" maxlength="40" autocomplete="username" required></label>
         <label>Yangi parol<input name="password" type="password" minlength="8" autocomplete="new-password" required></label>
         <label>Parolni qayta yozing<input name="password_confirm" type="password" minlength="8" autocomplete="new-password" required></label>
-        <button class="ok" type="submit">Adminni yaratish</button>
+        <button class="ok" type="submit">Rahbarni yaratish</button>
       </form>
     {% else %}
-      <h2>Admin kirishi</h2>
-      <div class="auth-note">5 marta noto'g'ri urinishdan keyin kirish 15 daqiqaga bloklanadi.</div>
+      <h2>Mebel360° tizimiga kirish</h2>
+      <div class="auth-note">Rahbar, konstruktor, menejer, ishchi va shafyor o'z login-paroli bilan kiradi. 5 marta noto'g'ri urinishdan keyin kirish 15 daqiqaga bloklanadi.</div>
       <form method="post" action="{{ url_for('login') }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-        <label>Login<input name="username" value="admin" autocomplete="username" required autofocus></label>
+        <label>Login<input name="username" autocomplete="username" required autofocus></label>
         <label>Parol<input name="password" type="password" autocomplete="current-password" required></label>
-        <button class="ok" type="submit">Kirish</button>
+        <button class="ok" type="submit">Tizimga kirish</button>
       </form>
     {% endif %}
   </div>
@@ -1349,7 +1493,7 @@ AUTH_BODY = r"""
 
 CONSTRUCTOR_BODY = r"""
 <div class="panel hero">
-  <div class="hero-grid"><div><h1>Konstruktor boshqaruv markazi</h1><p>Detalni kiriting yoki fayldan yuklang. Dastur eng yaxshi kroy variantini tanlaydi, kromkani hisoblaydi va ishchiga xavfsiz topshiriq yuboradi.</p></div><div class="hero-actions no-print"><a class="btn" href="{{ url_for('download_backup') }}">Baza nusxasini yuklash</a><span class="btn2 btn">Avto-zaxira: faol</span></div></div>
+  <div class="hero-grid"><div><h1>Konstruktor boshqaruv markazi</h1><p>Detalni kiriting yoki fayldan yuklang. Dastur eng yaxshi kroy variantini tanlaydi, kromkani hisoblaydi va ishchiga xavfsiz topshiriq yuboradi.</p></div><div class="hero-actions no-print">{% if session.get('user_role')=='admin' %}<a class="btn" href="{{ url_for('download_backup') }}">Baza nusxasini yuklash</a>{% endif %}<span class="btn2 btn">Avto-zaxira: faol</span></div></div>
 </div>
 <div class="grid">
   <div>
@@ -1456,34 +1600,89 @@ function prepareSubmit(){const total=parts.reduce((s,p)=>s+Number(p.qty||1),0);i
 
 JOB_BODY = r"""
 <div class="panel">
-  <div class="worker-header"><div><h2>{{ job.order_code }} — {{ job.material }}</h2><div class="muted">Mijoz: {{ job.customer or '-' }} · Ishchi: {{ job.worker_name or '-' }} · {{ job.created_at }}</div></div>{% if qr %}<img class="qr no-print" src="{{ qr }}" alt="Ishchi QR kod">{% endif %}</div>
-  <div class="statusline"><span class="stat">{{ sheets|length }} ta list</span><span class="stat">{{ total_parts }} ta detal</span><span class="stat">Kromka ×1.1: {{ '%.2f'|format(edge_m) }} m</span><span class="stat">{{ opt_label }}</span><span class="stat">{{ job.tested_variants }} variant</span><span class="stat">Holat: {{ job.status }}</span></div>
+  <div class="worker-header"><div><h2>{{ job.order_code }} — {{ job.material }}</h2><div class="muted">Mijoz: {{ job.customer or '-' }} · Ishchi: {{ job.worker_name or '-' }} · {{ job.created_at }}</div></div><span class="badge {{ 'ready' if snapshot.progress==100 else 'progress' }}">{{ snapshot.progress }}% · {{ snapshot.stage }}</span></div>
+  <div class="statusline"><span class="stat">{{ sheets|length }} ta list</span><span class="stat">{{ total_parts }} ta detal</span><span class="stat">Kromka ×1.1: {{ '%.2f'|format(edge_m) }} m</span><span class="stat">{{ opt_label }}</span><span class="stat">Holat: {{ job.status }}</span><span class="stat">Yetkazish: {{ job.delivery_status or 'Kutilmoqda' }}</span></div>
   <div class="actions no-print">
-    {% if job.worker_link_active %}<a class="btn ok" href="{{ worker_url }}" target="_blank">Ishchi oynasini ochish</a><button class="btn2" type="button" onclick="navigator.clipboard.writeText('{{ worker_url }}').then(()=>alert('Havola nusxalandi'))">Havolani nusxalash</button><form method="post" action="{{ url_for('worker_link_revoke',job_id=job.id) }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="danger" type="submit" onclick="return confirm('Ishchi havolasi bekor qilinsinmi?')">Havolani bekor qilish</button></form>{% else %}<span class="badge revoked">Ishchi havolasi bekor qilingan</span><form method="post" action="{{ url_for('worker_link_regenerate',job_id=job.id) }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="ok" type="submit">Yangi havola yaratish</button></form>{% endif %}
+    {% if job.worker_link_active %}<a class="btn ok" href="{{ worker_url }}" target="_blank">Ishchi oynasi</a><button class="btn2" type="button" onclick="navigator.clipboard.writeText('{{ worker_url }}').then(()=>alert('Ishchi havolasi nusxalandi'))">Ishchi havolasini olish</button>{% if session.get('user_role') in ['admin','constructor','manager'] %}<form method="post" action="{{ url_for('worker_link_revoke',job_id=job.id) }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="danger" type="submit" onclick="return confirm('Ishchi havolasi bekor qilinsinmi?')">Bekor qilish</button></form>{% endif %}{% else %}<span class="badge revoked">Ishchi havolasi bekor qilingan</span>{% if session.get('user_role') in ['admin','constructor','manager'] %}<form method="post" action="{{ url_for('worker_link_regenerate',job_id=job.id) }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="ok" type="submit">Yangi havola</button></form>{% endif %}{% endif %}
+    <a class="btn" href="{{ customer_url }}" target="_blank">Mijoz kuzatuvi</a><button class="btn2" type="button" onclick="navigator.clipboard.writeText('{{ customer_url }}').then(()=>alert('Mijoz havolasi nusxalandi'))">Mijozga yuborish</button>
     <a class="btn warn" href="{{ url_for('job_pdf',job_id=job.id) }}" target="_blank">A4 PDF</a>
   </div>
+  <div class="split-grid" style="margin-top:12px">
+    <div class="notice-preview"><b>Avtomatik bildirishnoma faol:</b> ishchi “Kroy kesildi” yoki “Kromka tayyor”ni bossa, mijozning kuzatuv sahifasida shu zahoti yangi xabar va foiz paydo bo'ladi.</div>
+    <div class="copy-box"><input readonly value="{{ customer_url }}"><button type="button" onclick="navigator.clipboard.writeText('{{ customer_url }}').then(()=>alert('Nusxalandi'))">Nusxalash</button></div>
+  </div>
   {% if attachments %}<div class="security-note"><b>Biriktirilgan chizma:</b>{% for a in attachments %}<div class="attachment"><div><div class="attachment-name">{{ a.original_name }}</div><div class="attachment-meta">{{ (a.size_bytes/1024)|round(1) }} KB · {{ a.created_at }}</div></div><a class="btn light" href="{{ url_for('attachment_download',attachment_id=a.id) }}">STO yuklash</a></div>{% endfor %}</div>{% endif %}
-  <div class="security-note">Ishchi havolasi maxfiy. Begona odamga tushsa, shu sahifadan darhol bekor qilib yangi havola yarating.</div>
 </div>
-<div class="sheet-grid">{% for row,plan,svg in sheets %}<div class="sheet-card"><div class="sheet-head"><div><div class="sheet-title">List {{ plan.number }} · {{ plan.width }}×{{ plan.height }} mm</div><div class="muted">{{ plan.placements|length }} detal · Foydalanish {{ usage(plan) }}% · <span class="offcut-stat">{{ offcut(plan) }}</span> · {{ opt_label }} / {{ job.tested_variants }} variant</div></div><span class="badge {{ 'ready' if row.cut_done and row.edge_done else ('progress' if row.cut_done or row.edge_done else '') }}">{{ 'Tayyor' if row.cut_done and row.edge_done else ('Jarayonda' if row.cut_done or row.edge_done else 'Kutilmoqda') }}</span></div>{{ svg|safe }}<div class="legend"><b>O‘lcham yozuvi atrofidagi qizil qisqa chiziq = kromka.</b> Pushti maydon = qoldiq. <b>GUL ↕</b> = detalni aylantirib bo‘lmaydi. T=tepa, P=past, Ch=chap, O=o‘ng.</div></div>{% endfor %}</div>
+<div class="split-grid">
+  <div><div class="sheet-grid">{% for row,plan,svg in sheets %}<div class="sheet-card"><div class="sheet-head"><div><div class="sheet-title">List {{ plan.number }} · {{ plan.width }}×{{ plan.height }} mm</div><div class="muted">{{ plan.placements|length }} detal · Foydalanish {{ usage(plan) }}% · <span class="offcut-stat">{{ offcut(plan) }}</span></div></div><span class="badge {{ 'ready' if row.cut_done and row.edge_done else ('progress' if row.cut_done or row.edge_done else '') }}">{{ 'Tayyor' if row.cut_done and row.edge_done else ('Jarayonda' if row.cut_done or row.edge_done else 'Kutilmoqda') }}</span></div>{{ svg|safe }}<div class="legend"><b>O'lcham atrofidagi qizil chiziq = kromka.</b> Pushti maydon = qoldiq. GUL ↕ = aylantirilmaydi.</div></div>{% endfor %}</div></div>
+  <div>
+    <div class="panel"><h3>Mijozga ko'ringan yangiliklar</h3>{% if updates %}<div class="timeline">{% for u in updates %}<div class="timeline-item"><div class="timeline-title">{{ u.title }}</div><div class="timeline-time">{{ u.created_at }} · {{ u.progress }}%</div><div class="timeline-message">{{ u.message }}</div></div>{% endfor %}</div>{% else %}<div class="empty">Yangilik yo'q</div>{% endif %}</div>
+    {% if session.get('user_role') in ['admin','manager','constructor'] %}<div class="panel"><h3>Menejer xabari</h3><form method="post" action="{{ url_for('manager_customer_update',job_id=job.id) }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><label>Sarlavha<input name="title" placeholder="Masalan: Yig'ish boshlandi" required></label><label>Mijozga xabar<textarea name="message" placeholder="Qisqa va tushunarli xabar" required></textarea></label><label>Tayyorlik foizi<input name="progress" type="number" min="0" max="100" value="{{ snapshot.progress }}"></label><button class="ok" type="submit">Mijozga ko'rsatish</button></form></div>{% endif %}
+  </div>
+</div>
 """
 
 
 WORKER_BODY = r"""
 <div class="panel no-print">
-  <div class="worker-header"><div><h2>{{ job.order_code }}</h2><div class="muted">{{ job.material }} · {{ job.worker_name or 'Ishchi' }} · {{ job.customer or '' }}</div></div><span class="badge">{{ job.status }}</span></div>
-  <div class="statusline"><span class="stat">List: {{ sheets|length }}</span><span class="stat">Detal: {{ total_parts }}</span><span class="stat">Jami kromka ×1.1: {{ '%.2f'|format(edge_m) }} m</span><span class="stat">Kroy usuli: {{ opt_label }}</span><span class="stat">Tekshirildi: {{ job.tested_variants }} variant</span><span class="stat">Kromka o'lcham atrofidagi qizil chiziqda</span></div>
-  <div class="actions"><button class="btn ok" type="button" onclick="window.print()">Printerdan chiqarish</button><a class="btn warn" href="{{ url_for('worker_pdf',token=job.token) }}" target="_blank">A4 PDF - 2 list/bet</a></div>
+  <div class="worker-header"><div><h2>{{ job.order_code }}</h2><div class="muted">{{ job.material }} · {{ job.worker_name or 'Ishchi' }} · {{ job.customer or '' }}</div></div><span class="badge {{ 'ready' if snapshot.progress>=80 else 'progress' }}">{{ snapshot.progress }}% · {{ snapshot.stage }}</span></div>
+  <div class="notice-preview" style="margin-top:10px"><b>Mijozga avtomatik xabar:</b> “Kroy kesildi” yoki “Kromka tayyor”ni belgilab saqlashingiz bilan buyurtmachining telefonidagi kuzatuv sahifasi yangilanadi.</div>
+  <div class="statusline"><span class="stat">List: {{ sheets|length }}</span><span class="stat">Detal: {{ total_parts }}</span><span class="stat">Jami kromka ×1.1: {{ '%.2f'|format(edge_m) }} m</span><span class="stat">Kroy usuli: {{ opt_label }}</span></div>
+  <div class="actions"><button class="btn ok" type="button" onclick="window.print()">Printerdan chiqarish</button><a class="btn warn" href="{{ url_for('worker_pdf',token=job.token) }}" target="_blank">A4 PDF — 2 list/bet</a></div>
 </div>
-<div class="sheet-grid">{% for row,plan,svg in sheets %}<div class="sheet-card"><div class="sheet-head"><div><div class="sheet-title">{{ job.order_code }} · List {{ plan.number }} · {{ plan.width }}×{{ plan.height }}</div><div class="muted">{{ plan.placements|length }} detal · {{ usage(plan) }}% · <span class="offcut-stat">{{ offcut(plan) }}</span> · {{ opt_label }} / {{ job.tested_variants }} variant · Kromka ×1.1</div></div><span class="badge">{{ 'Tayyor' if row.cut_done and row.edge_done else ('Kesildi' if row.cut_done else 'Yangi') }}</span></div>{{ svg|safe }}
-<div class="legend"><b>O'lcham yozuvi atrofidagi qizil qisqa chiziq = kromka.</b> Pushti maydon = foydalanish mumkin bo'lgan qoldiq. <b>GUL ↕</b> = aylantirish taqiqlangan. Detal ichidagi `K:` belgisi kromka tomonlarini ko'rsatadi.</div>
-<form class="no-print" method="post" action="{{ url_for('worker_update',token=job.token,sheet_no=plan.number) }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><div class="checks"><label class="check"><input name="cut_done" type="checkbox" {{ 'checked' if row.cut_done else '' }}>Kroy kesildi</label><label class="check"><input name="edge_done" type="checkbox" {{ 'checked' if row.edge_done else '' }}>Kromka tayyor</label></div><label>Izoh<textarea name="note" placeholder="Kamchilik yoki izoh">{{ row.note }}</textarea></label><button class="ok" type="submit">Saqlash</button></form></div>{% endfor %}</div>
+<div class="sheet-grid">{% for row,plan,svg in sheets %}<div class="sheet-card"><div class="sheet-head"><div><div class="sheet-title">{{ job.order_code }} · List {{ plan.number }} · {{ plan.width }}×{{ plan.height }}</div><div class="muted">{{ plan.placements|length }} detal · {{ usage(plan) }}% · <span class="offcut-stat">{{ offcut(plan) }}</span></div></div><span class="badge {{ 'ready' if row.cut_done and row.edge_done else ('progress' if row.cut_done else '') }}">{{ 'Kroy va kromka tayyor' if row.cut_done and row.edge_done else ('Kroy kesildi' if row.cut_done else 'Yangi') }}</span></div>{{ svg|safe }}
+<div class="legend"><b>Qizil qisqa chiziq = kromka.</b> Pushti maydon = foydalanish mumkin bo'lgan qoldiq. GUL ↕ = aylantirilmaydi.</div>
+<form class="no-print" method="post" action="{{ url_for('worker_update',token=job.token,sheet_no=plan.number) }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><div class="checks"><label class="check"><input name="cut_done" type="checkbox" {{ 'checked disabled' if row.cut_done else '' }}>Kroy kesildi</label><label class="check"><input name="edge_done" type="checkbox" {{ 'checked disabled' if row.edge_done else '' }}>Kromka tayyor</label></div>{% if row.cut_done %}<input type="hidden" name="cut_done" value="1">{% endif %}{% if row.edge_done %}<input type="hidden" name="edge_done" value="1">{% endif %}<label>Izoh<textarea name="note" placeholder="Kamchilik yoki izoh">{{ row.note }}</textarea></label><button class="ok" type="submit">Saqlash va mijozga bildirish</button></form></div>{% endfor %}</div>
 """
 
 
+DASHBOARD_BODY = r"""
+<div class="panel dashboard-hero"><h1>Mebel360° boshqaruv markazi</h1><p>Har bir xodim o'z bo'limida ishlaydi. Buyurtmadagi bajarilgan bosqichlar mijozga avtomatik ko'rinadi.</p></div>
+<div class="kpi-grid"><div class="kpi"><b>{{ stats.total }}</b><span>Jami buyurtma</span></div><div class="kpi"><b>{{ stats.process }}</b><span>Jarayonda</span></div><div class="kpi"><b>{{ stats.ready }}</b><span>Kroy va kromka tayyor</span></div><div class="kpi"><b>{{ stats.delivered }}</b><span>Yetkazilgan</span></div></div>
+<div class="role-grid">
+{% if role in ['admin','constructor'] %}<a class="role-card" href="{{ url_for('constructor') }}"><div class="role-icon">📐</div><h3>Konstruktor</h3><p>Detal, kroy, kromka, PRO100 fayli va ishchi topshirig'i.</p><div class="role-arrow">Bo'limga kirish →</div></a>{% endif %}
+{% if role in ['admin','manager'] %}<a class="role-card" href="{{ url_for('manager_dashboard') }}"><div class="role-icon">📋</div><h3>Menejer</h3><p>Buyurtmalar, tayyorlik foizi, mijoz havolasi va xabarlar.</p><div class="role-arrow">Bo'limga kirish →</div></a>{% endif %}
+{% if role in ['admin','manager','constructor','worker'] %}<a class="role-card" href="{{ url_for('worker_center') }}"><div class="role-icon">🛠️</div><h3>Ishchi</h3><p>Kroy va kromka holatini belgilash, A4 topshiriq va izohlar.</p><div class="role-arrow">Bo'limga kirish →</div></a>{% endif %}
+{% if role in ['admin','manager','driver'] %}<a class="role-card" href="{{ url_for('driver_dashboard') }}"><div class="role-icon">🚚</div><h3>Shafyor</h3><p>Yetkazishga tayyor, yo'lda va yetkazildi holatlari.</p><div class="role-arrow">Bo'limga kirish →</div></a>{% endif %}
+</div>
+<div class="panel"><h3>So'nggi buyurtmalar</h3>{% if jobs %}<div class="tablewrap"><table><thead><tr><th>Kod</th><th>Mijoz</th><th>Jarayon</th><th>Tayyorlik</th><th></th></tr></thead><tbody>{% for j in jobs %}<tr><td><b>{{ j.order_code }}</b></td><td>{{ j.customer or '-' }}</td><td>{{ j.stage }}</td><td><div class="progress-track"><div class="progress-fill" style="width:{{ j.progress }}%"></div></div><div class="progress-label">{{ j.progress }}%</div></td><td><a class="btn light" href="{{ url_for('job_view',job_id=j.id) }}">Ochish</a></td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty">Hozircha buyurtma yo'q</div>{% endif %}</div>
+"""
+
+MANAGER_BODY = r"""
+<div class="panel hero"><div class="hero-grid"><div><h1>Menejer boshqaruvi</h1><p>Mijoz buyurtmasi qayerga yetganini bitta oynada ko'ring va kuzatuv havolasini yuboring.</p></div><div class="hero-actions">{% if session.get('user_role') in ['admin','constructor'] %}<a class="btn" href="{{ url_for('constructor') }}">Yangi kroy</a>{% endif %}</div></div></div>
+<div class="kpi-grid"><div class="kpi"><b>{{ stats.total }}</b><span>Buyurtmalar</span></div><div class="kpi"><b>{{ stats.process }}</b><span>Jarayonda</span></div><div class="kpi"><b>{{ stats.ready }}</b><span>Tayyor</span></div><div class="kpi"><b>{{ stats.delivered }}</b><span>Yetkazilgan</span></div></div>
+<div class="panel"><h3>Buyurtmalar nazorati</h3>{% for j in jobs %}<div class="order-card"><div class="order-head"><div><div class="order-code">{{ j.order_code }}</div><div class="muted">{{ j.customer or 'Mijoz yozilmagan' }} · {{ j.material }}</div></div><span class="badge {{ 'ready' if j.progress==100 else 'progress' }}">{{ j.progress }}%</span></div><div class="progress-track" style="margin-top:10px"><div class="progress-fill" style="width:{{ j.progress }}%"></div></div><div class="progress-label">{{ j.stage }} · Yetkazish: {{ j.delivery_status }}</div><div class="actions"><a class="btn light" href="{{ url_for('job_view',job_id=j.id) }}">Buyurtmani ochish</a><a class="btn" target="_blank" href="{{ j.customer_url }}">Mijoz oynasi</a><button class="btn2" type="button" onclick="navigator.clipboard.writeText('{{ j.customer_url }}').then(()=>alert('Mijoz havolasi nusxalandi'))">Havolani nusxalash</button></div></div>{% else %}<div class="empty">Hozircha buyurtma yo'q</div>{% endfor %}</div>
+"""
+
+WORKER_CENTER_BODY = r"""
+<div class="panel hero"><div class="hero-grid"><div><h1>Ishchi topshiriqlari</h1><p>Ishchi maxfiy havolani ochadi, kroy va kromka tugaganini belgilaydi. Mijozga xabar avtomatik tushadi.</p></div></div></div>
+<div class="panel">{% for j in jobs %}<div class="order-card"><div class="order-head"><div><div class="order-code">{{ j.order_code }}</div><div class="muted">{{ j.worker_name or 'Ishchi belgilanmagan' }} · {{ j.material }} · {{ j.customer or '-' }}</div></div><span class="badge {{ 'ready' if j.progress>=80 else 'progress' }}">{{ j.progress }}%</span></div><div class="progress-track" style="margin-top:10px"><div class="progress-fill" style="width:{{ j.progress }}%"></div></div><div class="actions"><a class="btn ok" href="{{ j.worker_url }}" target="_blank">Topshiriqni ochish</a><button class="btn2" type="button" onclick="navigator.clipboard.writeText('{{ j.worker_url }}').then(()=>alert('Ishchi havolasi nusxalandi'))">Havolani olish</button><a class="btn light" href="{{ url_for('job_view',job_id=j.id) }}">Nazorat</a></div></div>{% else %}<div class="empty">Ishchi topshirig'i yo'q</div>{% endfor %}</div>
+"""
+
+DRIVER_BODY = r"""
+<div class="panel hero"><div class="hero-grid"><div><h1>Shafyor boshqaruvi</h1><p>Yetkazish holatini yangilang. “Yo'lda” yoki “Yetkazildi” bosilishi bilan mijozning telefonida xabar chiqadi.</p></div></div></div>
+<div class="panel">{% for j in jobs %}<div class="order-card"><div class="order-head"><div><div class="order-code">{{ j.order_code }}</div><div class="muted">{{ j.customer or '-' }} · {{ j.material }}</div></div><span class="delivery-status {{ 'road' if j.delivery_status=="Yo'lda" else ('done' if j.delivery_status=='Yetkazildi' else '') }}">{{ j.delivery_status }}</span></div><div class="progress-track" style="margin-top:10px"><div class="progress-fill" style="width:{{ j.progress }}%"></div></div><div class="progress-label">{{ j.progress }}% · {{ j.stage }}</div><form method="post" action="{{ url_for('driver_update',job_id=j.id) }}" style="margin-top:10px"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><label>Shafyor izohi<input name="note" value="{{ j.delivery_note or '' }}" placeholder="Masalan: 15:30 da yo'lga chiqildi"></label><div class="delivery-buttons">{% for st in delivery_statuses %}<button class="{{ 'ok' if st=='Yetkazildi' else ('warn' if st=="Yo'lda" else 'btn2') }}" type="submit" name="status" value="{{ st }}">{{ st }}</button>{% endfor %}</div></form></div>{% else %}<div class="empty">Buyurtma yo'q</div>{% endfor %}</div>
+"""
+
+CUSTOMER_BODY = r"""
+<div class="customer-shell">
+  <div class="customer-top"><div class="customer-code">BUYURTMA {{ job.order_code }}</div><div class="customer-title">{{ job.customer or 'Hurmatli mijoz' }}</div><div class="customer-stage">{{ snapshot.stage }}</div><div class="customer-progress"><div class="customer-progress-row"><span>Tayyorlik</span><span>{{ snapshot.progress }}%</span></div><div class="progress-track"><div class="progress-fill" style="width:{{ snapshot.progress }}%"></div></div></div><div class="stage-list">{% for st in stages %}<div class="stage-step {{ st.state }}">{{ st.name }}</div>{% endfor %}</div></div>
+  <div class="panel" style="margin-top:14px"><div class="statusline"><span class="stat">Material: {{ job.material }}</span><span class="stat">Holat: {{ job.status }}</span><span class="stat">Yetkazish: {{ job.delivery_status or 'Kutilmoqda' }}</span></div><div class="notice-preview"><b>Jonli kuzatuv:</b> ishchi bajarilgan bosqichni belgilashi bilan bu sahifa avtomatik yangilanadi.</div></div>
+  <div class="panel"><h3>Buyurtma yangiliklari</h3>{% if updates %}<div class="timeline">{% for u in updates %}<div class="timeline-item"><div class="timeline-title">{{ u.title }}</div><div class="timeline-time">{{ u.created_at }} · {{ u.progress }}%</div><div class="timeline-message">{{ u.message }}</div></div>{% endfor %}</div>{% else %}<div class="empty">Yangiliklar kutilmoqda</div>{% endif %}<div class="auto-note">Sahifa har 15 soniyada avtomatik yangilanadi.</div></div>
+</div><script>setTimeout(()=>location.reload(),15000);</script>
+"""
+
+USERS_BODY = r"""
+<div class="panel hero"><div class="hero-grid"><div><h1>Xodimlar va rollar</h1><p>Har bir xodimga alohida login bering. Parollar bazada shifrlangan holda saqlanadi.</p></div></div></div>
+<div class="user-grid"><div class="panel"><h3>Yangi xodim</h3><form method="post" action="{{ url_for('user_create') }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><label>Login<input name="username" minlength="3" maxlength="40" required></label><label>Parol<input name="password" type="password" minlength="8" required></label><label>Roli<select name="role">{% for key,label in role_labels.items() %}{% if key!='admin' %}<option value="{{ key }}">{{ label }}</option>{% endif %}{% endfor %}</select></label><button class="ok" type="submit">Xodimni yaratish</button></form></div><div class="panel"><h3>Foydalanuvchilar</h3><div class="tablewrap"><table><thead><tr><th>Login</th><th>Roli</th><th>Holati</th><th></th></tr></thead><tbody>{% for u in users_list %}<tr><td><b>{{ u.username }}</b></td><td>{{ role_labels.get(u.role,u.role) }}</td><td>{{ 'Faol' if u.is_active else "O'chirilgan" }}</td><td>{% if u.id != session.get('admin_user_id') %}<form method="post" action="{{ url_for('user_toggle',user_id=u.id) }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="{{ 'danger' if u.is_active else 'ok' }}" type="submit">{{ "O'chirish" if u.is_active else 'Faollashtirish' }}</button></form>{% endif %}</td></tr>{% endfor %}</tbody></table></div></div></div>
+"""
+
+
+
 def render_page(title: str, body_template: str, **context: Any) -> str:
+    context.setdefault("role_labels", ROLE_LABELS)
     body = render_template_string(body_template, **context)
-    return render_template_string(BASE_TEMPLATE, title=title, body=body)
+    return render_template_string(BASE_TEMPLATE, title=title, body=body, role_labels=ROLE_LABELS)
 
 
 def current_draft() -> dict[str, Any]:
@@ -1576,17 +1775,69 @@ def _clear_login_attempts(ip: str) -> None:
     conn.close()
 
 
-def admin_login_required(view):
+def login_required(view):
     @wraps(view)
     def wrapped(*args: Any, **kwargs: Any):
         if not _admin_exists():
             return redirect(url_for("setup"))
         if not session.get("admin_user_id"):
-            flash("Avval admin sifatida kiring", "bad")
+            flash("Avval tizimga kiring", "bad")
             return redirect(url_for("login"))
         return view(*args, **kwargs)
-
     return wrapped
+
+
+def roles_required(*allowed_roles: str):
+    def decorator(view):
+        @wraps(view)
+        def wrapped(*args: Any, **kwargs: Any):
+            if not _admin_exists():
+                return redirect(url_for("setup"))
+            if not session.get("admin_user_id"):
+                flash("Avval tizimga kiring", "bad")
+                return redirect(url_for("login"))
+            role = session.get("user_role", "admin")
+            if role not in allowed_roles:
+                flash("Bu bo'limga kirish huquqingiz yo'q", "bad")
+                endpoint = ROLE_HOME_ENDPOINTS.get(role, "dashboard")
+                return redirect(url_for(endpoint))
+            return view(*args, **kwargs)
+        return wrapped
+    return decorator
+
+
+# Eski nom bilan yozilgan dekoratorlar ham ishlashda davom etadi.
+admin_login_required = login_required
+
+
+def _role_redirect(role: str) -> Response:
+    return redirect(url_for(ROLE_HOME_ENDPOINTS.get(role, "dashboard")))
+
+
+def _dashboard_rows(limit: int = 30) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM kroy_jobs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    result: list[dict[str, Any]] = []
+    stats = {"total": 0, "process": 0, "ready": 0, "delivered": 0}
+    for row in rows:
+        snap = _progress_snapshot(conn, row["id"])
+        item = dict(row)
+        item.update(snap)
+        item["customer_url"] = url_for("customer_view", token=row["customer_token"], _external=True)
+        item["worker_url"] = url_for("worker_view", token=row["token"], _external=True)
+        result.append(item)
+    all_rows = conn.execute("SELECT id,delivery_status FROM kroy_jobs").fetchall()
+    stats["total"] = len(all_rows)
+    for row in all_rows:
+        snap = _progress_snapshot(conn, row["id"])
+        if snap["delivery_status"] == "Yetkazildi":
+            stats["delivered"] += 1
+        elif snap["edges"] == snap["total"] and snap["total"]:
+            stats["ready"] += 1
+        else:
+            stats["process"] += 1
+    conn.close()
+    return result, stats
 
 
 @app.route("/")
@@ -1595,7 +1846,7 @@ def home() -> Response:
         return redirect(url_for("setup"))
     if not session.get("admin_user_id"):
         return redirect(url_for("login"))
-    return redirect(url_for("constructor"))
+    return _role_redirect(session.get("user_role", "admin"))
 
 
 @app.route("/setup", methods=["GET", "POST"])
@@ -1633,10 +1884,11 @@ def setup() -> Response | str:
         session.permanent = True
         session["admin_user_id"] = user_id
         session["admin_username"] = username
-        _audit("Birinchi admin yaratildi", user_id=user_id, username=username)
+        session["user_role"] = "admin"
+        _audit("Birinchi rahbar yaratildi", user_id=user_id, username=username)
         create_database_backup()
-        flash("Admin xavfsiz yaratildi")
-        return redirect(url_for("constructor"))
+        flash("Rahbar xavfsiz yaratildi")
+        return redirect(url_for("dashboard"))
     return render_page("Birinchi sozlash", AUTH_BODY, setup=True)
 
 
@@ -1645,7 +1897,7 @@ def login() -> Response | str:
     if not _admin_exists():
         return redirect(url_for("setup"))
     if session.get("admin_user_id"):
-        return redirect(url_for("constructor"))
+        return _role_redirect(session.get("user_role", "admin"))
     if request.method == "POST":
         ip = _client_ip()
         seconds_left = _block_seconds_left(ip)
@@ -1657,41 +1909,124 @@ def login() -> Response | str:
         password = request.form.get("password", "")
         conn = get_db()
         user = conn.execute(
-            """SELECT id,username,password_hash FROM app_users
-               WHERE username=? AND role='admin' AND is_active=1""",
+            "SELECT id,username,password_hash,role FROM app_users WHERE username=? AND is_active=1",
             (username,),
         ).fetchone()
         conn.close()
         if not user or not check_password_hash(user["password_hash"], password):
             just_blocked = _record_failed_login(ip)
-            _audit("Admin kirishi muvaffaqiyatsiz", username=username)
-            if just_blocked:
-                flash("5 marta noto'g'ri kiritildi. Kirish 15 daqiqaga bloklandi.", "bad")
-            else:
-                flash("Login yoki parol noto'g'ri", "bad")
+            _audit("Tizimga kirish muvaffaqiyatsiz", username=username)
+            flash("5 marta noto'g'ri kiritildi. Kirish 15 daqiqaga bloklandi." if just_blocked else "Login yoki parol noto'g'ri", "bad")
             return redirect(url_for("login"))
         _clear_login_attempts(ip)
         session.clear()
         session.permanent = True
         session["admin_user_id"] = int(user["id"])
         session["admin_username"] = user["username"]
-        _audit("Admin tizimga kirdi")
-        flash("Xush kelibsiz")
-        return redirect(url_for("constructor"))
-    return render_page("Admin kirishi", AUTH_BODY, setup=False)
+        session["user_role"] = user["role"]
+        _audit(f"{ROLE_LABELS.get(user['role'], user['role'])} tizimga kirdi")
+        flash(f"Xush kelibsiz, {ROLE_LABELS.get(user['role'], user['role'])}")
+        return _role_redirect(user["role"])
+    return render_page("Tizimga kirish", AUTH_BODY, setup=False)
 
 
 @app.post("/logout")
-@admin_login_required
+@login_required
 def logout() -> Response:
-    _audit("Admin tizimdan chiqdi")
+    _audit("Tizimdan chiqildi")
     session.clear()
     flash("Tizimdan chiqdingiz")
     return redirect(url_for("login"))
 
 
+@app.get("/dashboard")
+@login_required
+def dashboard() -> str:
+    jobs, stats = _dashboard_rows(8)
+    return render_page("Boshqaruv markazi", DASHBOARD_BODY, jobs=jobs, stats=stats, role=session.get("user_role", "admin"))
+
+
+@app.get("/manager")
+@roles_required("admin", "manager")
+def manager_dashboard() -> str:
+    jobs, stats = _dashboard_rows(100)
+    return render_page("Menejer", MANAGER_BODY, jobs=jobs, stats=stats)
+
+
+@app.get("/workers")
+@roles_required("admin", "manager", "constructor", "worker")
+def worker_center() -> str:
+    jobs, _ = _dashboard_rows(100)
+    return render_page("Ishchi topshiriqlari", WORKER_CENTER_BODY, jobs=jobs)
+
+
+@app.get("/driver")
+@roles_required("admin", "manager", "driver")
+def driver_dashboard() -> str:
+    jobs, _ = _dashboard_rows(100)
+    return render_page("Shafyor", DRIVER_BODY, jobs=jobs, delivery_statuses=DELIVERY_STATUSES)
+
+
+@app.get("/users")
+@roles_required("admin")
+def users() -> str:
+    conn = get_db()
+    users_list = conn.execute("SELECT id,username,role,is_active,created_at FROM app_users ORDER BY id").fetchall()
+    conn.close()
+    return render_page("Xodimlar", USERS_BODY, users_list=users_list)
+
+
+@app.post("/users/create")
+@roles_required("admin")
+def user_create() -> Response:
+    username = request.form.get("username", "").strip()
+    password = request.form.get("password", "")
+    role = request.form.get("role", "worker")
+    if role not in ROLE_LABELS or role == "admin":
+        flash("Xodim roli noto'g'ri", "bad")
+        return redirect(url_for("users"))
+    if len(username) < 3 or len(username) > 40 or any(ch.isspace() for ch in username):
+        flash("Login 3-40 belgi bo'lsin", "bad")
+        return redirect(url_for("users"))
+    if len(password) < 8:
+        flash("Parol kamida 8 belgi bo'lsin", "bad")
+        return redirect(url_for("users"))
+    conn = get_db()
+    try:
+        conn.execute("INSERT INTO app_users(username,password_hash,role,is_active,created_at) VALUES(?,?,?,?,?)", (username, generate_password_hash(password), role, 1, now_iso()))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        flash("Bu login band", "bad")
+        return redirect(url_for("users"))
+    conn.close()
+    create_database_backup()
+    _audit(f"Xodim yaratildi: {username} / {role}")
+    flash(f"{ROLE_LABELS[role]} uchun login yaratildi")
+    return redirect(url_for("users"))
+
+
+@app.post("/users/<int:user_id>/toggle")
+@roles_required("admin")
+def user_toggle(user_id: int) -> Response:
+    if user_id == session.get("admin_user_id"):
+        flash("O'zingizni o'chira olmaysiz", "bad")
+        return redirect(url_for("users"))
+    conn = get_db()
+    row = conn.execute("SELECT username,is_active FROM app_users WHERE id=?", (user_id,)).fetchone()
+    if not row:
+        conn.close()
+        abort(404)
+    conn.execute("UPDATE app_users SET is_active=? WHERE id=?", (0 if row["is_active"] else 1, user_id))
+    conn.commit()
+    conn.close()
+    create_database_backup()
+    flash("Xodim holati yangilandi")
+    return redirect(url_for("users"))
+
+
 @app.route("/constructor")
-@admin_login_required
+@roles_required("admin", "constructor")
 def constructor() -> str:
     draft = current_draft()
     parts: list[dict[str, Any]] = []
@@ -1712,7 +2047,7 @@ def constructor() -> str:
 
 
 @app.post("/constructor/dbf")
-@admin_login_required
+@roles_required("admin", "constructor")
 def dbf_import() -> Response:
     upload = request.files.get("dbf")
     if not upload or not upload.filename:
@@ -1746,7 +2081,7 @@ def dbf_import() -> Response:
 
 
 @app.post("/constructor/table-import")
-@admin_login_required
+@roles_required("admin", "constructor")
 def table_import() -> Response:
     upload = request.files.get("table_file")
     if not upload or not upload.filename:
@@ -1784,7 +2119,7 @@ def table_import() -> Response:
 
 
 @app.post("/jobs")
-@admin_login_required
+@roles_required("admin", "constructor")
 def job_create() -> Response:
     try:
         parts_data = json.loads(request.form.get("parts_json", "[]"))
@@ -1867,7 +2202,7 @@ def job_create() -> Response:
     return redirect(url_for("job_view", job_id=job_id))
 
 @app.get("/jobs/<int:job_id>")
-@admin_login_required
+@roles_required("admin", "constructor", "manager", "worker", "driver")
 def job_view(job_id: int) -> str:
     job, parts, sheets_raw = load_job(job_id=job_id)
     worker_url = url_for("worker_view", token=job["token"], _external=True) if job["worker_link_active"] else ""
@@ -1875,16 +2210,20 @@ def job_view(job_id: int) -> str:
     total_parts = sum(p["qty"] for p in parts)
     conn = get_db()
     attachments = conn.execute("SELECT * FROM kroy_attachments WHERE job_id=? ORDER BY id", (job_id,)).fetchall()
+    updates = conn.execute("SELECT * FROM customer_updates WHERE job_id=? ORDER BY id DESC", (job_id,)).fetchall()
+    snapshot = _progress_snapshot(conn, job_id)
     conn.close()
+    customer_url = url_for("customer_view", token=job["customer_token"], _external=True)
     return render_page(
         f"Kroy {job['order_code']}", JOB_BODY, job=job, sheets=sheets, total_parts=total_parts,
-        edge_m=parts_edge_m(parts), worker_url=worker_url, qr=qr_data_uri(worker_url) if worker_url else "", usage=sheet_usage, offcut=offcut_text,
+        edge_m=parts_edge_m(parts), worker_url=worker_url, customer_url=customer_url,
+        usage=sheet_usage, offcut=offcut_text, snapshot=snapshot, updates=updates,
         opt_label=optimization_label(job["optimization_mode"]), attachments=attachments,
     )
 
 
 @app.post("/jobs/<int:job_id>/worker-link/revoke")
-@admin_login_required
+@roles_required("admin", "constructor", "manager")
 def worker_link_revoke(job_id: int) -> Response:
     job, _, _ = load_job(job_id=job_id)
     conn = get_db()
@@ -1898,7 +2237,7 @@ def worker_link_revoke(job_id: int) -> Response:
 
 
 @app.post("/jobs/<int:job_id>/worker-link/regenerate")
-@admin_login_required
+@roles_required("admin", "constructor", "manager")
 def worker_link_regenerate(job_id: int) -> Response:
     job, _, _ = load_job(job_id=job_id)
     new_token = secrets.token_urlsafe(24)
@@ -1916,7 +2255,7 @@ def worker_link_regenerate(job_id: int) -> Response:
 
 
 @app.get("/attachments/<int:attachment_id>")
-@admin_login_required
+@roles_required("admin", "constructor", "manager")
 def attachment_download(attachment_id: int) -> Response:
     conn = get_db()
     row = conn.execute("SELECT * FROM kroy_attachments WHERE id=?", (attachment_id,)).fetchone()
@@ -1930,7 +2269,7 @@ def attachment_download(attachment_id: int) -> Response:
 
 
 @app.get("/admin/backup.db")
-@admin_login_required
+@roles_required("admin")
 def download_backup() -> Response:
     backup = create_database_backup()
     if not backup or not backup.exists():
@@ -1944,9 +2283,12 @@ def worker_view(token: str) -> str:
     job, parts, sheets_raw = load_job(token=token)
     sheets = [(row, plan, svg_for_plan(plan)) for row, plan in sheets_raw]
     total_parts = sum(p["qty"] for p in parts)
+    conn = get_db()
+    snapshot = _progress_snapshot(conn, job["id"])
+    conn.close()
     return render_page(
         f"Ishchi - {job['order_code']}", WORKER_BODY, job=job, sheets=sheets, total_parts=total_parts,
-        edge_m=parts_edge_m(parts), usage=sheet_usage, offcut=offcut_text,
+        edge_m=parts_edge_m(parts), usage=sheet_usage, offcut=offcut_text, snapshot=snapshot,
         opt_label=optimization_label(job["optimization_mode"]),
     )
 
@@ -1954,19 +2296,23 @@ def worker_view(token: str) -> str:
 @app.post("/worker/<token>/sheet/<int:sheet_no>")
 def worker_update(token: str, sheet_no: int) -> Response:
     job, _, _ = load_job(token=token)
-    cut_done = 1 if request.form.get("cut_done") else 0
-    edge_done = 1 if request.form.get("edge_done") else 0
-    if edge_done and not cut_done:
-        cut_done = 1
+    requested_cut = 1 if request.form.get("cut_done") else 0
+    requested_edge = 1 if request.form.get("edge_done") else 0
     note = request.form.get("note", "").strip()[:500]
     conn = get_db()
-    cur = conn.execute(
+    old = conn.execute("SELECT cut_done,edge_done FROM kroy_sheets WHERE job_id=? AND sheet_no=?", (job["id"], sheet_no)).fetchone()
+    if not old:
+        conn.close()
+        abort(404)
+    # Bajarilgan ish ortga qaytmaydi: tasodifiy bosish mijozdagi xabarni buzmaydi.
+    cut_done = max(int(old["cut_done"] or 0), requested_cut)
+    edge_done = max(int(old["edge_done"] or 0), requested_edge)
+    if edge_done:
+        cut_done = 1
+    conn.execute(
         "UPDATE kroy_sheets SET cut_done=?,edge_done=?,note=? WHERE job_id=? AND sheet_no=?",
         (cut_done, edge_done, note, job["id"], sheet_no),
     )
-    if cur.rowcount != 1:
-        conn.close()
-        abort(404)
     stats = conn.execute(
         "SELECT COUNT(*) total,COALESCE(SUM(cut_done),0) cuts,COALESCE(SUM(edge_done),0) edges FROM kroy_sheets WHERE job_id=?",
         (job["id"],),
@@ -1974,6 +2320,17 @@ def worker_update(token: str, sheet_no: int) -> Response:
     total = int(stats["total"] or 0)
     cuts = int(stats["cuts"] or 0)
     edges = int(stats["edges"] or 0)
+    progress = _job_progress_from_counts(total, cuts, edges, job["delivery_status"] or "Kutilmoqda")
+    if cut_done and not int(old["cut_done"] or 0):
+        if total and cuts == total:
+            _add_customer_update(conn, job["id"], "all-cut-done", "Kroy ishlari tugadi", f"{job['order_code']} buyurtmasining barcha detallari kesildi. Endi kromka ishlari davom etadi.", "Kroy", max(40, progress))
+        else:
+            _add_customer_update(conn, job["id"], f"sheet-{sheet_no}-cut", f"{sheet_no}-list kesildi", f"{job['order_code']} buyurtmasining {sheet_no}-listidagi detallar kesildi.", "Kroy", progress)
+    if edge_done and not int(old["edge_done"] or 0):
+        if total and edges == total:
+            _add_customer_update(conn, job["id"], "all-edge-done", "Kromka ishlari tugadi", f"{job['order_code']} buyurtmasining barcha kromkalari urildi. Konstruktor bosqichi tayyor.", "Kromka", 80)
+        else:
+            _add_customer_update(conn, job["id"], f"sheet-{sheet_no}-edge", f"{sheet_no}-list kromkasi tayyor", f"{job['order_code']} buyurtmasining {sheet_no}-list kromkasi urildi.", "Kromka", progress)
     if total and cuts == total and edges == total:
         status, finished_at = "Tayyor", now_iso()
     elif cuts or edges:
@@ -1985,11 +2342,74 @@ def worker_update(token: str, sheet_no: int) -> Response:
     conn.close()
     create_database_backup()
     _audit(f"Ishchi list {sheet_no} holatini yangiladi: {job['order_code']}", username=job["worker_name"] or "Ishchi")
-    flash(f"List {sheet_no} holati saqlandi")
+    flash(f"List {sheet_no} saqlandi. Mijoz kuzatuvi avtomatik yangilandi.")
     return redirect(url_for("worker_view", token=token))
 
+
+@app.post("/manager/jobs/<int:job_id>/customer-update")
+@roles_required("admin", "manager", "constructor")
+def manager_customer_update(job_id: int) -> Response:
+    job, _, _ = load_job(job_id=job_id)
+    title = request.form.get("title", "").strip()[:140]
+    message = request.form.get("message", "").strip()[:500]
+    try:
+        progress = max(0, min(100, int(request.form.get("progress", 0))))
+    except ValueError:
+        progress = 0
+    if not title or not message:
+        flash("Sarlavha va xabarni yozing", "bad")
+        return redirect(url_for("job_view", job_id=job_id))
+    conn = get_db()
+    _add_customer_update(conn, job_id, f"manual-{secrets.token_hex(6)}", title, message, "Menejer", progress)
+    conn.commit()
+    conn.close()
+    create_database_backup()
+    _audit(f"Mijozga xabar qo'shildi: {job['order_code']}")
+    flash("Xabar mijoz kuzatuv sahifasiga qo'shildi")
+    return redirect(url_for("job_view", job_id=job_id))
+
+
+@app.post("/driver/jobs/<int:job_id>/status")
+@roles_required("admin", "manager", "driver")
+def driver_update(job_id: int) -> Response:
+    job, _, _ = load_job(job_id=job_id)
+    status = request.form.get("status", "Kutilmoqda")
+    note = request.form.get("note", "").strip()[:500]
+    if status not in DELIVERY_STATUSES:
+        flash("Yetkazish holati noto'g'ri", "bad")
+        return redirect(url_for("driver_dashboard"))
+    delivered_at = now_iso() if status == "Yetkazildi" else ""
+    conn = get_db()
+    conn.execute("UPDATE kroy_jobs SET delivery_status=?,delivery_note=?,delivered_at=? WHERE id=?", (status, note, delivered_at, job_id))
+    progress_map = {"Kutilmoqda": 80, "Yetkazishga tayyor": 85, "Yo'lda": 95, "Yetkazildi": 100}
+    title_map = {"Kutilmoqda": "Yetkazish rejalashtirilmoqda", "Yetkazishga tayyor": "Buyurtma yetkazishga tayyor", "Yo'lda": "Buyurtma yo'lga chiqdi", "Yetkazildi": "Buyurtma yetkazildi"}
+    message_map = {"Kutilmoqda": f"{job['order_code']} buyurtmasining yetkazish vaqti rejalashtirilmoqda.", "Yetkazishga tayyor": f"{job['order_code']} buyurtmasi yuklash va yetkazishga tayyor.", "Yo'lda": f"{job['order_code']} buyurtmasi siz tomon yo'lga chiqdi.", "Yetkazildi": f"{job['order_code']} buyurtmasi yetkazildi. Ishonchingiz uchun rahmat!"}
+    if note:
+        message_map[status] += " " + note
+    _add_customer_update(conn, job_id, f"delivery-{status}-{secrets.token_hex(4)}", title_map[status], message_map[status], "Yetkazish", progress_map[status])
+    conn.commit()
+    conn.close()
+    create_database_backup()
+    _audit(f"Yetkazish holati: {job['order_code']} / {status}")
+    flash("Yetkazish holati saqlandi va mijozga bildirildi")
+    return redirect(url_for("driver_dashboard"))
+
+
+@app.get("/customer/<token>")
+def customer_view(token: str) -> str:
+    conn = get_db()
+    job = conn.execute("SELECT * FROM kroy_jobs WHERE customer_token=? AND customer_link_active=1", (token,)).fetchone()
+    if not job:
+        conn.close()
+        abort(404)
+    snapshot = _progress_snapshot(conn, job["id"])
+    updates = conn.execute("SELECT * FROM customer_updates WHERE job_id=? ORDER BY id DESC", (job["id"],)).fetchall()
+    conn.close()
+    return render_page(f"Buyurtma {job['order_code']}", CUSTOMER_BODY, job=job, snapshot=snapshot, stages=_customer_stages(snapshot), updates=updates)
+
+
 @app.get("/jobs/<int:job_id>/a4.pdf")
-@admin_login_required
+@roles_required("admin", "constructor", "manager", "worker")
 def job_pdf(job_id: int) -> Response:
     job, _, sheets = load_job(job_id=job_id)
     out = build_pdf(job, sheets)
@@ -2007,7 +2427,7 @@ def worker_pdf(token: str) -> Response:
 
 @app.get("/api/health")
 def health() -> Response:
-    return jsonify({"ok": True, "module": "Mebel360 Kroy Pro V8"})
+    return jsonify({"ok": True, "module": "Mebel360 Boshqaruv Pro V9", "customer_updates": True, "roles": list(ROLE_LABELS)})
 
 
 @app.errorhandler(400)
@@ -2018,7 +2438,7 @@ def bad_request(error: Exception) -> tuple[str, int]:
 
 @app.errorhandler(410)
 def link_expired(_: Exception) -> tuple[str, int]:
-    return "Bu ishchi havolasi bekor qilingan. Rahbardan yangi havola oling.", 410
+    return "Bu maxfiy havola bekor qilingan. Rahbardan yangi havola oling.", 410
 
 
 @app.errorhandler(413)
