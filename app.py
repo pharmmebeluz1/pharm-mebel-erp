@@ -1,3517 +1,2486 @@
 # -*- coding: utf-8 -*-
+"""Mebel360 Boshqaruv Pro V9.
+
+Asosiy imkoniyatlar:
+- Zamonaviy Rahbar, Konstruktor, Menejer, Ishchi va Shafyor bo'limlari.
+- Har bir xodim uchun alohida shifrlangan login-parol va rol bo'yicha kirish.
+- Konstruktor: DBF/CSV/TXT, PRO100 STO, kroy, kromka x1.1 va A4 PDF.
+- Ishchi “Kroy kesildi” yoki “Kromka tayyor”ni belgilasa, mijoz kuzatuvi avtomatik yangilanadi.
+- Mijoz uchun maxfiy havola, jonli tayyorlik foizi va buyurtma yangiliklari.
+- Shafyor: “Yetkazishga tayyor”, “Yo'lda”, “Yetkazildi” holatlari va mijozga avtomatik xabar.
+- SQLite baza, kunlik zaxira nusxa, CSRF himoyasi va login bloklash.
+
+Ishga tushirish:
+    pip install -r requirements.txt
+    python app.py
+Brauzer: http://127.0.0.1:5000
+"""
+from __future__ import annotations
+
+import base64
 import csv
 import io
+import json
 import os
-import sqlite3
-import secrets
-from datetime import datetime, date, timedelta
-from flask import Flask, jsonify, request, render_template_string, Response, session, redirect, url_for, send_file, send_from_directory, flash
-import qrcode
-from werkzeug.security import generate_password_hash, check_password_hash
-from werkzeug.utils import secure_filename
-from docx import Document
-from docx.shared import Pt, Cm
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
-import hashlib
-_original_md5 = hashlib.md5
-def _md5_windows7_compat(*args, **kwargs):
-    kwargs.pop("usedforsecurity", None)
-    return _original_md5(*args, **kwargs)
-hashlib.md5 = _md5_windows7_compat
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from reportlab.lib.utils import simpleSplit
 import re
+import secrets
+import sqlite3
+import random
+import struct
+from dataclasses import dataclass, asdict, field
+from datetime import datetime, timedelta
+from functools import wraps
+from pathlib import Path
 from zoneinfo import ZoneInfo
+from typing import Any, Iterable
+
+from flask import (
+    Flask,
+    Response,
+    abort,
+    flash,
+    jsonify,
+    redirect,
+    render_template_string,
+    request,
+    send_file,
+    session,
+    url_for,
+)
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.pdfmetrics import stringWidth
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfgen import canvas
+from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
+
+try:
+    import qrcode
+except ImportError:  # QR bo'lmasa ham dastur ishlaydi
+    qrcode = None
+
+APP_DIR = Path(__file__).resolve().parent
+DB_PATH = Path(os.environ.get("MEBEL360_KROY_DB", APP_DIR / "kroy_demo.db"))
+BACKUP_DIR = Path(os.environ.get("MEBEL360_BACKUP_DIR", APP_DIR / "backups"))
+UPLOAD_DIR = Path(os.environ.get("MEBEL360_UPLOAD_DIR", APP_DIR / "uploads"))
+MAX_REQUEST_BYTES = 25 * 1024 * 1024
+MAX_IMPORT_BYTES = 5 * 1024 * 1024
+MAX_STO_BYTES = 20 * 1024 * 1024
+MAX_PART_TYPES = 500
+MAX_TOTAL_PARTS = 2500
+MIN_PART_MM = 10
+MAX_PART_MM = 10000
+BACKUP_KEEP_DAYS = 14
+EDGE_MULTIPLIER = 1.10
+OPTIMIZATION_LABELS = {
+    "fast": "Tezkor - 60 variantgacha",
+    "full": "Standart - 120 variantgacha",
+    "large": "Chuqur - 240 variantgacha",
+}
+
+ROLE_LABELS = {
+    "admin": "Rahbar",
+    "constructor": "Konstruktor",
+    "manager": "Menejer",
+    "worker": "Ishchi",
+    "driver": "Shafyor",
+}
+ROLE_HOME_ENDPOINTS = {
+    "admin": "dashboard",
+    "constructor": "constructor",
+    "manager": "manager_dashboard",
+    "worker": "worker_center",
+    "driver": "driver_dashboard",
+}
+DELIVERY_STATUSES = ("Kutilmoqda", "Yetkazishga tayyor", "Yo'lda", "Yetkazildi")
+
+
+def optimization_label(mode: str) -> str:
+    return OPTIMIZATION_LABELS.get(mode or "large", OPTIMIZATION_LABELS["large"])
+
 
 app = Flask(__name__)
-
-
-def _tashkent_now():
-    """Server qayerda ishlashidan qat’i nazar Toshkent vaqtini qaytaradi."""
-    return datetime.now(ZoneInfo("Asia/Tashkent"))
-
-
-def _tashkent_today():
-    return _tashkent_now().date().isoformat()
-
-
-DB_NAME = os.environ.get("PHARM_ERP_DB", "pharm_mebel_erp_pro.db")
-_APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CONSTRUCTOR_UPLOAD_DIR = os.path.join(_APP_DIR, "uploads", "konstruktor")
-os.makedirs(CONSTRUCTOR_UPLOAD_DIR, exist_ok=True)
-app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024
-
-
-def _get_or_create_secret_key():
-    """PHARM_ERP_SECRET muhit o'zgaruvchisi bo'lmasa, bir martalik tasodifiy
-    kalit yaratib, faylga saqlaydi (har safar ilova qayta ishga tushganda
-    bir xil kalit ishlatilishi uchun, aks holda barcha sessiyalar uziladi)."""
-    env_key = os.environ.get("PHARM_ERP_SECRET")
-    if env_key:
-        return env_key
-    key_path = os.path.join(_APP_DIR, ".secret_key")
-    if os.path.exists(key_path):
-        with open(key_path, "r", encoding="utf-8") as f:
-            saved = f.read().strip()
-            if saved:
-                return saved
-    new_key = secrets.token_hex(32)
-    try:
-        with open(key_path, "w", encoding="utf-8") as f:
-            f.write(new_key)
-    except Exception:
-        pass
-    return new_key
-
-
-app.secret_key = _get_or_create_secret_key()
+app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=os.environ.get("PHARM_ERP_HTTPS", "0") == "1",
+    SESSION_COOKIE_SECURE=(
+        os.environ.get(
+            "MEBEL360_COOKIE_SECURE",
+            "1" if os.environ.get("RENDER") else "0",
+        )
+        == "1"
+    ),
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
 )
 
 
-# ---------- UCH TILLI TIZIM: O‘ZBEKCHA / RUSCHA / INGLIZCHA ----------
-PHARM_I18N_WIDGET = '\n<!-- PHARM_MEBEL_3_LANGUAGE_SYSTEM_V1 -->\n<style id="pharm-i18n-style">\n#pharm-lang-box{position:fixed;top:10px;right:10px;z-index:99999;display:flex;gap:5px;padding:5px;border-radius:12px;background:rgba(255,255,255,.96);border:1px solid rgba(15,23,42,.14);box-shadow:0 8px 24px rgba(15,23,42,.18);font-family:Arial,sans-serif}\n#pharm-lang-box.pharm-lang-inline{position:static;box-shadow:none;background:rgba(255,255,255,.13);border-color:rgba(255,255,255,.28);padding:4px}\n#pharm-lang-box button{width:auto!important;margin:0!important;padding:7px 10px!important;border:0!important;border-radius:8px!important;background:#e2e8f0!important;color:#0f172a!important;font-size:12px!important;font-weight:800!important;line-height:1!important;cursor:pointer!important;white-space:nowrap!important}\n#pharm-lang-box button.active{background:#16a34a!important;color:#fff!important;box-shadow:0 3px 10px rgba(22,163,74,.28)!important}\n@media(max-width:700px){#pharm-lang-box:not(.pharm-lang-inline){top:auto;right:8px;bottom:8px}#pharm-lang-box button{padding:7px 8px!important;font-size:11px!important}}\n</style>\n<div id="pharm-lang-box" data-pharm-i18n-ignore="1" aria-label="Til tanlash">\n<button type="button" data-pharm-lang="uz">O‘zbekcha</button>\n<button type="button" data-pharm-lang="ru">Русский</button>\n<button type="button" data-pharm-lang="en">English</button>\n</div>\n<script id="pharm-i18n-script">\n(function(){\n\'use strict\';\nconst DICT={ru:{"Dastur ochilmoqda...":"Программа загружается...","Kirish":"Войти","Pharm Mebel dasturiga xush kelibsiz":"Добро пожаловать в программу Pharm Mebel","Faqat sizga biriktirilgan vazifalar va ruxsat berilgan bo‘limlar ochiladi.":"Откроются только назначенные вам задачи и разрешённые разделы.","Kirish →":"Войти →","Konstruktor":"Конструктор","Mebel360° — {{role_label}} kirishi":"Mebel360° — вход: {{role_label}}","Menejer":"Менеджер","Parol":"Пароль","← Rahbar kirishi":"← Вход руководителя","Akkaunt yaratish yoki parolni yangilash":"Создать аккаунт или обновить пароль","Amal":"Действие","Bosh sahifa":"Главная","Hali akkaunt yaratilmagan.":"Аккаунт ещё не создан.","Holat":"Статус","Ism":"Имя","Login":"Логин","Mavjud akkauntlar":"Существующие аккаунты","Menejer va Konstruktor akkauntlari":"Аккаунты менеджера и конструктора","Rol":"Роль","Saqlash":"Сохранить","🔐 Menejer va Konstruktor akkauntlari":"🔐 Аккаунты менеджера и конструктора","Avans":"Аванс","Boshlanish":"Начало","Buyurtma yo‘q.":"Заказов нет.","Buyurtmalar":"Заказы","Buyurtmani saqlash":"Сохранить заказ","Chiqish":"Выйти","FAOL":"АКТИВНЫЕ","JAMI BUYURTMA":"ВСЕГО ЗАКАЗОВ","JAMI SUMMA":"ОБЩАЯ СУММА","Jarayon":"Процесс","Jarayonda":"В процессе","Kod":"Код","Kod / mijoz":"Код / клиент","Mahsulot":"Изделие","Manzil":"Адрес","Material":"Материал","Menejer kabineti":"Кабинет менеджера","Mijoz":"Клиент","Qo‘shish":"Добавить","Rang":"Цвет","Summa / qoldiq":"Сумма / остаток","TUSHUM":"ПОСТУПЛЕНИЯ","Taxminiy tayyor":"Ориентировочная готовность","Tayyor":"Готово","Telefon":"Телефон","To‘lov":"Оплата","Tugash":"Окончание","Umumiy narx":"Общая стоимость","Yangi":"Новый","Yangi buyurtma":"Новый заказ","Yangilash":"Обновить","Yetkazildi":"Доставлено","Yetkazishga tayyor":"Готово к доставке","Yopildi":"Закрыто","Bajarildi":"Выполнено","Buyurtma holati":"Статус заказа","Buyurtmani tanlang.":"Выберите заказ.","Chizma tayyorlanmoqda":"Чертёж подготавливается","Chizma, kroy va CNC fayli":"Чертёж, раскрой и CNC-файл","Fayl":"Файл","Fayl nomi/izohi":"Название файла / примечание","Faylni yuklash":"Загрузить файл","Hali fayl yuklanmagan.":"Файл ещё не загружен.","Holatni yangilash":"Обновить статус","Ishlab chiqarish bosqichlari":"Этапы производства","Konstruktor kabineti":"Кабинет конструктора","Material tayyorlanmoqda":"Материал подготавливается","Material:":"Материал:","Mijoz tasdiqlashi kutilmoqda":"Ожидается подтверждение клиента","Mijoz:":"Клиент:","O‘lcham:":"Размер:","Rang:":"Цвет:","Soni:":"Количество:","Admin akkauntini yaratish":"Создать аккаунт администратора","Pharm Mebel - Birinchi xavfsiz sozlash":"Pharm Mebel — первая безопасная настройка","🔐 Birinchi xavfsiz sozlash":"🔐 Первая безопасная настройка","22 yillik amaliy tajriba va yo‘l qo‘yilgan xatolardan olingan saboqlar asosida shakllangan tizim":"Система, созданная на основе 22-летнего практического опыта и уроков, извлечённых из допущенных ошибок","Boshqa kabinetlar":"Другие кабинеты","Buyurtmalar va ishlab chiqarish nazorati":"Контроль заказов и производства","Buyurtmalar va mijozlar":"Заказы и клиенты","Chizma, kroy va CNC":"Чертежи, раскрой и CNC","Dastur boshqaruv paneliga kirish uchun login va parolingizni kiriting.":"Введите логин и пароль для входа в панель управления.","Ishchi kirishi":"Вход работника","Ishchi ro‘yxati":"Регистрация работника","Kabinetga kirish":"Войти в кабинет","Konstruktor kirishi":"Вход конструктора","Korxona, buyurtmalar, ishchilar va omborni yagona tizimda boshqaring.":"Управляйте предприятием, заказами, работниками и складом в единой системе.","Ko‘rsatish":"Показать","Mebel360° boshqaruv tizimi":"Система управления Mebel360°","Menejer kirishi":"Вход менеджера","Menejer, Konstruktor, Ishchi va Shofyor kabinetlari":"Кабинеты менеджера, конструктора, работника и водителя","Ombor, xarajat va hisobotlar":"Склад, расходы и отчёты","Pharm Mebel — Rahbar kirishi":"Pharm Mebel — вход руководителя","Shofyor kirishi":"Вход водителя","Shofyor ro‘yxati":"Регистрация водителя","Xush kelibsiz":"Добро пожаловать","Yangi akkaunt":"Новый аккаунт","◆ Rahbar kabineti":"◆ Кабинет руководителя","ISHCHILAR":"РАБОТНИКИ","FAOL BUYURTMALAR":"АКТИВНЫЕ ЗАКАЗЫ","BUGUNGI SOAT":"ЧАСОВ СЕГОДНЯ","BUGUNGI ISH":"РАБОТА СЕГОДНЯ","BUGUNGI KM":"КМ СЕГОДНЯ","KAM QOLDIQ":"МАЛЫЙ ОСТАТОК","Ishchilar":"Работники","Keldi-ketdi":"Приход-уход","Ish natijasi":"Результат работы","Ombor":"Склад","Shofyor":"Водитель","Jarima":"Штраф","Jami/Reyting":"Итоги/Рейтинг","Xarajat":"Расход","Bonus/Ta’til":"Бонус/Отпуск","Tayyor mahsulot":"Готовая продукция","Foyda":"Прибыль","Mijoz PRO":"Клиент PRO","Servis/Kafolat":"Сервис/Гарантия","Yetkazish":"Доставка","Yangi ishchi":"Новый работник","Familiya":"Фамилия","Lavozim":"Должность","Ishga kirgan sana":"Дата приёма","Staj (yil)":"Стаж (лет)","Kunlik stavka":"Дневная ставка","Oylik maosh":"Месячная зарплата","Sifat balli (1-10)":"Оценка качества (1-10)","Tezlik balli (1-10)":"Оценка скорости (1-10)","Intizom balli (1-10)":"Оценка дисциплины (1-10)","Maxfiy hujjatlar":"Конфиденциальные документы","Bu ma’lumotlarni faqat rahbar ko‘radi.":"Эти данные видит только руководитель.","Pasport/ID seriya-raqami":"Серия и номер паспорта/ID","JSHSHIR":"ПИНФЛ","Tug‘ilgan sana":"Дата рождения","Yashash manzili":"Адрес проживания","Pasport berilgan sana":"Дата выдачи паспорта","Pasportni bergan tashkilot":"Орган, выдавший паспорт","Favqulodda aloqa telefoni":"Экстренный телефон","Staj":"Стаж","Kunlik":"Дневная","Oylik":"Месячная","O‘chirish":"Удалить","Avtomatik keldi-ketdi":"Автоматический приход-уход","Hozir keldi":"Пришёл сейчас","Hozir ketdi":"Ушёл сейчас","Qo‘lda kiritish":"Ввести вручную","Sana":"Дата","Keldi":"Пришёл","Ketdi":"Ушёл","Soat":"Часы","Ish turi":"Вид работы","Miqdor":"Количество","Birlik narxi":"Цена за единицу","Buyurtma kodi":"Код заказа","Haq":"Оплата труда","Buyurtma":"Заказ","Pasport/ID":"Паспорт/ID","O‘lcham":"Размер","Soni":"Количество","Oraliq to‘lov":"Промежуточный платёж","To‘lov usuli":"Способ оплаты","Naqd":"Наличные","Bank orqali":"Банковский перевод","Plastik karta":"Банковская карта","Qarz":"Долг","Kiritilgan":"Включено","Kiritilmagan":"Не включено","Alohida haq":"Отдельная оплата","Kafolat muddati":"Срок гарантии","Boshlanish sana":"Дата начала","Tugash sana":"Дата окончания","Taxminiy tayyor sana":"Ориентировочная дата готовности","Mas’ul xodim":"Ответственный сотрудник","Kechikish sababi":"Причина задержки","Yo‘q":"Нет","Korxona":"Предприятие","Favqulodda holat":"Чрезвычайная ситуация","Kechikish chegirmasi (%/kun)":"Скидка за задержку (%/день)","Maksimal chegirma %":"Максимальная скидка %","Keshbek %":"Кешбэк %","Keshbek summasi":"Сумма кешбэка","Kafolat boshlanish":"Начало гарантии","Kafolat tugash":"Окончание гарантии","Kafolat sharti":"Условия гарантии","Lokatsiya havolasi":"Ссылка на геолокацию","Mo‘ljal":"Ориентир","Qavat":"Этаж","Lift":"Лифт","Bor":"Есть","Katta mashina":"Крупная машина","Kira oladi":"Может заехать","Kira olmaydi":"Не может заехать","Bosqich":"Этап","Buyurtma bosqichlari":"Этапы заказа","Ombor harakati":"Движение склада","Turi":"Тип","Kirim":"Приход","Chiqim":"Расход","Ombor qoldig‘i":"Остатки склада","Kategoriya":"Категория","Qoldiq":"Остаток","Birlik":"Единица","Min.":"Мин.","Shofyor safari":"Поездка водителя","Mashina":"Машина","Qayerdan":"Откуда","Qayerga":"Куда","Masofa km":"Расстояние, км","Sabab":"Причина","Yoqilg‘i litr":"Топливо, л","Yo‘nalish":"Маршрут","Summa":"Сумма","Sababi":"Причина","Hisoblash":"Рассчитать","Shu oy":"Этот месяц","Excel/CSV":"Excel/CSV","O‘rin":"Место","Kun":"Дни","Ish haqi":"Заработок","Bonus":"Бонус","To‘langan":"Выплачено","Reyting":"Рейтинг","Yangi xarajat":"Новый расход","Xarajat nomi":"Наименование расхода","Kimga berildi":"Кому выдано","Chek rasmi yoki havolasi":"Фото чека или ссылка","Ofis va reklama":"Офис и реклама","Mijoz va buyurtma":"Клиент и заказ","Uy":"Дом","Favqulodda":"Экстренное","Boshqa":"Другое","Bonus saqlash":"Сохранить бонус","Bonuslar":"Бонусы","Ta’til / holat":"Отпуск / статус","Dam olish":"Отдых","Kasallik":"Болезнь","Sababsiz":"Без причины","Ta’til va holatlar":"Отпуска и статусы","Nomi":"Название","Kodi":"Код","Moliyaviy xulosa":"Финансовый итог","KIRIM":"ДОХОД","XARAJAT":"РАСХОД","ISHCHI TO‘LOV":"ВЫПЛАТЫ РАБОТНИКАМ","BONUS":"БОНУС","SOF FOYDA":"ЧИСТАЯ ПРИБЫЛЬ","Mijoz bahosi":"Оценка клиента","Mebel sifati (1-5)":"Качество мебели (1-5)","Muddat (1-5)":"Срок (1-5)","Muomala (1-5)":"Обслуживание (1-5)","Yetkazish (1-5)":"Доставка (1-5)","Montaj (1-5)":"Монтаж (1-5)","Bahoni saqlash":"Сохранить оценку","Qo‘shimcha ishlar":"Дополнительные работы","Ish nomi":"Название работы","Qo‘shimcha summa":"Дополнительная сумма","Qo‘shimcha kun":"Дополнительные дни","Servis / kafolat murojaati":"Обращение по сервису / гарантии","Muammo":"Проблема","Servis sanasi":"Дата сервиса","Usta":"Мастер","Qabul qilish":"Принять","Pullik xizmat":"Платная услуга","Yetkazishni rejalash":"Планирование доставки","Haydovchi":"Водитель","Navbat":"Очередь","Yo‘l xarajati":"Дорожные расходы","Rejalash":"Запланировать","PRO boshqaruv":"PRO управление","Menejer / Konstruktor":"Менеджер / Конструктор","Shofyor boshqaruvi":"Управление водителями","Shartnoma Word":"Договор Word","Shartnoma PDF":"Договор PDF","Backup":"Резервная копия","Ishchilar, buyurtmalar, ombor, ishlab chiqarish va moliya":"Работники, заказы, склад, производство и финансы","Toshkent vaqti":"Время Ташкента","Dushanba":"Понедельник","Seshanba":"Вторник","Chorshanba":"Среда","Payshanba":"Четверг","Juma":"Пятница","Shanba":"Суббота","Yakshanba":"Воскресенье","yanvar":"января","fevral":"февраля","mart":"марта","aprel":"апреля","may":"мая","iyun":"июня","iyul":"июля","avgust":"августа","sentabr":"сентября","oktabr":"октября","noyabr":"ноября","dekabr":"декабря","Toshkent":"Ташкент","Ro‘yxatdan o‘tish":"Зарегистрироваться","Akkauntim bor — kirish":"У меня есть аккаунт — войти","Yangi shofyor — ro‘yxatdan o‘tish":"Новый водитель — зарегистрироваться","Rahbar kirishi":"Вход руководителя","Menga biriktirilgan yuklar":"Назначенные мне доставки","Hozircha yuk biriktirilmagan.":"Доставки пока не назначены.","Orqaga":"Назад","Qadoqlar":"Упаковки","Yetkazish navbati":"Очередь доставки","Xarita tanlang":"Выберите карту","Lokatsiyani o‘zingiz xohlagan xaritada oching.":"Откройте геолокацию в удобной карте.","Yo‘lga chiqdim":"Я выехал","Yetib keldim":"Я прибыл","Yetkazib berdim":"Доставил","Shofyor login yaratish":"Создать логин водителя","Akkaunt yaratish":"Создать аккаунт","Yuk biriktirish":"Назначить доставку","Qadoq soni":"Количество упаковок","Biriktirish":"Назначить","Shofyor akkauntlari":"Аккаунты водителей","Tasdiqlangan":"Подтверждено","Kutilmoqda":"Ожидается","Tasdiqlash":"Подтвердить","Bloklash":"Заблокировать","Biriktirilgan yuklar":"Назначенные доставки","Ishchi ro‘yxatdan o‘tishi":"Регистрация работника","Telefon raqamingiz":"Ваш номер телефона","Masalan":"Например","Kod olish":"Получить код","Sinov kodi":"Тестовый код","Haqiqiy SMS xizmati ulanmaguncha shu koddan foydalaning.":"Используйте этот код до подключения настоящего SMS-сервиса.","Kodni kiritish":"Ввести код","Kodni tasdiqlash":"Подтверждение кода","Telefonni tasdiqlash":"Подтвердить телефон","Yangi login":"Новый логин","Yangi parol":"Новый пароль","Ro‘yxatdan o‘tdingiz":"Вы зарегистрировались","Endi administrator akkauntingizni tasdiqlaydi. Tasdiqlangach login va parolingiz bilan kirasiz.":"Теперь администратор подтвердит ваш аккаунт. После подтверждения войдите с логином и паролем.","Kirish sahifasi":"Страница входа","Ishchi kabineti":"Кабинет работника","Yangi ro‘yxatdan o‘tish":"Новая регистрация","HOZIRGI HOLAT":"ТЕКУЩИЙ СТАТУС","ISHLAGAN KUN":"ОТРАБОТАНО ДНЕЙ","JAMI SOAT":"ВСЕГО ЧАСОВ","Hozir ishlayotgan ishim":"Моя текущая работа","Boshlangan vaqt":"Время начала","Ishchi boshqaruvi":"Управление работниками","Ishchi kabinetlarini boshqarish":"Управление кабинетами работников","ERP bosh sahifa":"Главная ERP","Yangi topshiriq":"Новое задание","Topshiriq":"Задание","Boshlanish rejasi":"План начала","Tugash rejasi":"План окончания","Topshiriq berish":"Назначить задание","Ro‘yxatdan o‘tganlar":"Зарегистрированные","Ishchi":"Работник","dona":"шт.","komplekt":"комплект","metr":"метр","soat":"час","yil":"год","kun":"день","daqiqa":"минута","safar":"поездка","loyiha":"проект","buyurtma":"заказ","list":"лист","kg":"кг","m²":"м²","ta":"шт.","Akam":"Для брата","Akril":"Акрил","Asbob-uskunalar":"Инструменты и оборудование","Bank xizmati":"Банковские услуги","Benzin":"Бензин","Blok pitaniya":"Блок питания","Bolt va gayka":"Болт и гайка","Bozorga borish":"Поездка на рынок","Bo‘yash":"Покраска","Bo‘yoq":"Краска","Buxgalteriya":"Бухгалтерия","CNC Rover":"CNC Rover","Chiqindi olib ketish":"Вывоз отходов","Chizma tayyorlash":"Подготовка чертежа","Click":"Click","DSP":"ДСП","DVP":"ДВП","Dastur xarajati":"Расходы на программу","Disk":"Диск","Dizayn":"Дизайн","Dizel":"Дизель","Domen":"Домен","Ehtiyot qismlar":"Запчасти","Ekokoja":"Экокожа","Elektr":"Электричество","Fanera":"Фанера","Favqulodda xarajat":"Экстренный расход","Foto-video":"Фото-видео","Freza":"Фреза","Frezalash":"Фрезеровка","Furnitura":"Фурнитура","Gaz":"Газ","Gazlift":"Газлифт","Grunt":"Грунтовка","G‘ildirak":"Колесо","HDF":"ХДФ","Himoya vositalari":"Средства защиты","Hosting":"Хостинг","Ijara":"Аренда","Instagram reklama":"Реклама в Instagram","Internet":"Интернет","Ish":"Работа","Ish hajmiga haq":"Оплата за объём работы","Ishchi kiyimi":"Рабочая одежда","Ishlab chiqarish":"Производство","Kafolat":"Гарантия","Kafolat ta’miri":"Гарантийный ремонт","Kantselyariya":"Канцелярия","Kartrij":"Картридж","Keshbek":"Кешбэк","Kechikish kompensatsiyasi":"Компенсация за задержку","Kimga":"Кому","Km":"Км","Kompressor xarajati":"Расходы на компрессор","Kompyuter ta’miri":"Ремонт компьютера","Ko‘tarma mexanizm":"Подъёмный механизм","Kromka":"Кромка","Kromka urish":"Кромкование","Kunlik ish haqi":"Дневная оплата","LDSP":"ЛДСП","LED lenta":"Светодиодная лента","Lak":"Лак","Lazer":"Лазер","MDF":"МДФ","Magnit":"Магнит","Material chiqindisi":"Отходы материала","Mato":"Ткань","Mashina ta’miri":"Ремонт автомобиля","Mijoz uyiga borish":"Выезд к клиенту","Mijozga chegirma":"Скидка клиенту","Montaj":"Монтаж","Moy almashtirish":"Замена масла","Moylash vositalari":"Смазочные материалы","Namuna tayyorlash":"Подготовка образца","Napravlyayushiy":"Направляющая","Narx":"Цена","OLX reklama":"Реклама на OLX","Ona uchun":"Для матери","Ota uchun":"Для отца","Ovqat puli":"Питание","Oyna":"Стекло","Oyna kesish":"Резка стекла","Oyna teshish":"Сверление стекла","Oyoq":"Ножка","Parking":"Парковка","Payme":"Payme","Payvandlash":"Сварка","Petlya":"Петля","Porolon":"Поролон","Printer qog‘ozi":"Бумага для принтера","Profil":"Профиль","Qadoqlash materiali":"Упаковочный материал","Qarzdorlik yopish":"Погашение долга","Qavatga ko‘tarish":"Подъём на этаж","Qayta ishlash xarajati":"Расходы на переделку","Qaytarilgan pul":"Возврат денег","Qo‘riqlash":"Охрана","Qo‘shimcha ish":"Дополнительная работа","Qo‘shimcha ish haqi":"Дополнительная оплата","Raspil":"Распил","Raspildan olib kelish":"Забрать с распила","Razmer olish":"Замер","Reklama":"Реклама","Ruchka":"Ручка","SMS xizmati":"SMS-сервис","Samorez":"Саморез","Sayqalash":"Шлифовка","Seh":"Цех","Seh uchun":"Для цеха","Servis":"Сервис","Shina":"Шина","Shisha":"Стекло","Shpaklyovka":"Шпаклёвка","Silikon":"Силикон","Sim va elektr jihozlari":"Провод и электрооборудование","Soatbay haq":"Почасовая оплата","Soliq":"Налог","Stanok ta’miri":"Ремонт станка","Suv":"Вода","Sverlo":"Сверло","Tashqi ustaga berilgan ish":"Работа внешнего мастера","Telegram reklama":"Реклама в Telegram","Teshish":"Сверление","Texnika xavfsizligi":"Техника безопасности","Telefon puli":"Расходы на телефон","Tozalash":"Уборка","Tortma mexanizmi":"Механизм ящика","Transport":"Транспорт","Uy uchun":"Для дома","Xizmat safari":"Командировка","Yaroqsiz mahsulot":"Бракованная продукция","Yelim":"Клей","Yetkazib berish":"Доставка","Yo‘l haqi":"Дорожный сбор","Yo‘l puli":"Транспортные расходы","Yuk tashish":"Грузоперевозка","Yuvish":"Мойка","Zamok":"Замок","Zımpara":"Наждачная бумага"},en:{"Dastur ochilmoqda...":"Loading the system...","Kirish":"Sign in","Pharm Mebel dasturiga xush kelibsiz":"Welcome to the Pharm Mebel system","Faqat sizga biriktirilgan vazifalar va ruxsat berilgan bo‘limlar ochiladi.":"Only tasks assigned to you and permitted sections will be available.","Kirish →":"Sign in →","Konstruktor":"Designer","Mebel360° — {{role_label}} kirishi":"Mebel360° — {{role_label}} sign-in","Menejer":"Manager","Parol":"Password","← Rahbar kirishi":"← Owner sign-in","Akkaunt yaratish yoki parolni yangilash":"Create an account or update the password","Amal":"Action","Bosh sahifa":"Home","Hali akkaunt yaratilmagan.":"No account has been created yet.","Holat":"Status","Ism":"First name","Login":"Login","Mavjud akkauntlar":"Existing accounts","Menejer va Konstruktor akkauntlari":"Manager and designer accounts","Rol":"Role","Saqlash":"Save","🔐 Menejer va Konstruktor akkauntlari":"🔐 Manager and designer accounts","Avans":"Advance","Boshlanish":"Start","Buyurtma yo‘q.":"No orders.","Buyurtmalar":"Orders","Buyurtmani saqlash":"Save order","Chiqish":"Sign out","FAOL":"ACTIVE","JAMI BUYURTMA":"TOTAL ORDERS","JAMI SUMMA":"TOTAL AMOUNT","Jarayon":"Progress","Jarayonda":"In progress","Kod":"Code","Kod / mijoz":"Code / customer","Mahsulot":"Product","Manzil":"Address","Material":"Material","Menejer kabineti":"Manager dashboard","Mijoz":"Customer","Qo‘shish":"Add","Rang":"Color","Summa / qoldiq":"Amount / balance","TUSHUM":"REVENUE","Taxminiy tayyor":"Estimated completion","Tayyor":"Ready","Telefon":"Phone","To‘lov":"Payment","Tugash":"End","Umumiy narx":"Total price","Yangi":"New","Yangi buyurtma":"New order","Yangilash":"Update","Yetkazildi":"Delivered","Yetkazishga tayyor":"Ready for delivery","Yopildi":"Closed","Bajarildi":"Completed","Buyurtma holati":"Order status","Buyurtmani tanlang.":"Select an order.","Chizma tayyorlanmoqda":"Drawing in preparation","Chizma, kroy va CNC fayli":"Drawing, cutting plan and CNC file","Fayl":"File","Fayl nomi/izohi":"File name / note","Faylni yuklash":"Upload file","Hali fayl yuklanmagan.":"No file has been uploaded yet.","Holatni yangilash":"Update status","Ishlab chiqarish bosqichlari":"Production stages","Konstruktor kabineti":"Designer dashboard","Material tayyorlanmoqda":"Material in preparation","Material:":"Material:","Mijoz tasdiqlashi kutilmoqda":"Waiting for customer approval","Mijoz:":"Customer:","O‘lcham:":"Size:","Rang:":"Color:","Soni:":"Quantity:","Admin akkauntini yaratish":"Create administrator account","Pharm Mebel - Birinchi xavfsiz sozlash":"Pharm Mebel — initial secure setup","🔐 Birinchi xavfsiz sozlash":"🔐 Initial secure setup","22 yillik amaliy tajriba va yo‘l qo‘yilgan xatolardan olingan saboqlar asosida shakllangan tizim":"A system shaped by 22 years of practical experience and lessons learned from mistakes","Boshqa kabinetlar":"Other dashboards","Buyurtmalar va ishlab chiqarish nazorati":"Order and production control","Buyurtmalar va mijozlar":"Orders and customers","Chizma, kroy va CNC":"Drawings, cutting and CNC","Dastur boshqaruv paneliga kirish uchun login va parolingizni kiriting.":"Enter your login and password to access the control panel.","Ishchi kirishi":"Worker sign-in","Ishchi ro‘yxati":"Worker registration","Kabinetga kirish":"Open dashboard","Konstruktor kirishi":"Designer sign-in","Korxona, buyurtmalar, ishchilar va omborni yagona tizimda boshqaring.":"Manage the company, orders, workers and inventory in one system.","Ko‘rsatish":"Show","Mebel360° boshqaruv tizimi":"Mebel360° management system","Menejer kirishi":"Manager sign-in","Menejer, Konstruktor, Ishchi va Shofyor kabinetlari":"Manager, designer, worker and driver dashboards","Ombor, xarajat va hisobotlar":"Inventory, expenses and reports","Pharm Mebel — Rahbar kirishi":"Pharm Mebel — owner sign-in","Shofyor kirishi":"Driver sign-in","Shofyor ro‘yxati":"Driver registration","Xush kelibsiz":"Welcome","Yangi akkaunt":"New account","◆ Rahbar kabineti":"◆ Owner dashboard","ISHCHILAR":"WORKERS","FAOL BUYURTMALAR":"ACTIVE ORDERS","BUGUNGI SOAT":"HOURS TODAY","BUGUNGI ISH":"WORK TODAY","BUGUNGI KM":"KM TODAY","KAM QOLDIQ":"LOW STOCK","Ishchilar":"Workers","Keldi-ketdi":"Attendance","Ish natijasi":"Work results","Ombor":"Inventory","Shofyor":"Driver","Jarima":"Penalty","Jami/Reyting":"Totals/Rating","Xarajat":"Expense","Bonus/Ta’til":"Bonus/Leave","Tayyor mahsulot":"Finished products","Foyda":"Profit","Mijoz PRO":"Customer PRO","Servis/Kafolat":"Service/Warranty","Yetkazish":"Delivery","Yangi ishchi":"New worker","Familiya":"Last name","Lavozim":"Position","Ishga kirgan sana":"Employment date","Staj (yil)":"Experience (years)","Kunlik stavka":"Daily rate","Oylik maosh":"Monthly salary","Sifat balli (1-10)":"Quality score (1-10)","Tezlik balli (1-10)":"Speed score (1-10)","Intizom balli (1-10)":"Discipline score (1-10)","Maxfiy hujjatlar":"Confidential documents","Bu ma’lumotlarni faqat rahbar ko‘radi.":"Only the owner can view this information.","Pasport/ID seriya-raqami":"Passport/ID series and number","JSHSHIR":"PINFL","Tug‘ilgan sana":"Date of birth","Yashash manzili":"Home address","Pasport berilgan sana":"Passport issue date","Pasportni bergan tashkilot":"Issuing authority","Favqulodda aloqa telefoni":"Emergency contact phone","Staj":"Experience","Kunlik":"Daily","Oylik":"Monthly","O‘chirish":"Delete","Avtomatik keldi-ketdi":"Automatic attendance","Hozir keldi":"Clock in now","Hozir ketdi":"Clock out now","Qo‘lda kiritish":"Enter manually","Sana":"Date","Keldi":"Clock-in","Ketdi":"Clock-out","Soat":"Hours","Ish turi":"Work type","Miqdor":"Quantity","Birlik narxi":"Unit price","Buyurtma kodi":"Order code","Haq":"Pay","Buyurtma":"Order","Pasport/ID":"Passport/ID","O‘lcham":"Size","Soni":"Quantity","Oraliq to‘lov":"Interim payment","To‘lov usuli":"Payment method","Naqd":"Cash","Bank orqali":"Bank transfer","Plastik karta":"Bank card","Qarz":"Credit","Kiritilgan":"Included","Kiritilmagan":"Not included","Alohida haq":"Separate charge","Kafolat muddati":"Warranty period","Boshlanish sana":"Start date","Tugash sana":"End date","Taxminiy tayyor sana":"Estimated completion date","Mas’ul xodim":"Responsible employee","Kechikish sababi":"Delay reason","Yo‘q":"No","Korxona":"Company","Favqulodda holat":"Emergency","Kechikish chegirmasi (%/kun)":"Delay discount (%/day)","Maksimal chegirma %":"Maximum discount %","Keshbek %":"Cashback %","Keshbek summasi":"Cashback amount","Kafolat boshlanish":"Warranty start","Kafolat tugash":"Warranty end","Kafolat sharti":"Warranty terms","Lokatsiya havolasi":"Location link","Mo‘ljal":"Landmark","Qavat":"Floor","Lift":"Elevator","Bor":"Available","Katta mashina":"Large vehicle","Kira oladi":"Can enter","Kira olmaydi":"Cannot enter","Bosqich":"Stage","Buyurtma bosqichlari":"Order stages","Ombor harakati":"Inventory movement","Turi":"Type","Kirim":"Incoming","Chiqim":"Outgoing","Ombor qoldig‘i":"Inventory balance","Kategoriya":"Category","Qoldiq":"Balance","Birlik":"Unit","Min.":"Min.","Shofyor safari":"Driver trip","Mashina":"Vehicle","Qayerdan":"From","Qayerga":"To","Masofa km":"Distance, km","Sabab":"Reason","Yoqilg‘i litr":"Fuel, litres","Yo‘nalish":"Route","Summa":"Amount","Sababi":"Reason","Hisoblash":"Calculate","Shu oy":"This month","Excel/CSV":"Excel/CSV","O‘rin":"Rank","Kun":"Days","Ish haqi":"Earnings","Bonus":"Bonus","To‘langan":"Paid","Reyting":"Rating","Yangi xarajat":"New expense","Xarajat nomi":"Expense name","Kimga berildi":"Paid to","Chek rasmi yoki havolasi":"Receipt image or link","Ofis va reklama":"Office and advertising","Mijoz va buyurtma":"Customer and order","Uy":"Home","Favqulodda":"Emergency","Boshqa":"Other","Bonus saqlash":"Save bonus","Bonuslar":"Bonuses","Ta’til / holat":"Leave / status","Dam olish":"Day off","Kasallik":"Sick leave","Sababsiz":"Unexcused","Ta’til va holatlar":"Leave and statuses","Nomi":"Name","Kodi":"Code","Moliyaviy xulosa":"Financial summary","KIRIM":"INCOME","XARAJAT":"EXPENSE","ISHCHI TO‘LOV":"WORKER PAYMENTS","BONUS":"BONUS","SOF FOYDA":"NET PROFIT","Mijoz bahosi":"Customer rating","Mebel sifati (1-5)":"Furniture quality (1-5)","Muddat (1-5)":"Deadline (1-5)","Muomala (1-5)":"Service (1-5)","Yetkazish (1-5)":"Delivery (1-5)","Montaj (1-5)":"Installation (1-5)","Bahoni saqlash":"Save rating","Qo‘shimcha ishlar":"Additional work","Ish nomi":"Work name","Qo‘shimcha summa":"Additional amount","Qo‘shimcha kun":"Additional days","Servis / kafolat murojaati":"Service / warranty request","Muammo":"Problem","Servis sanasi":"Service date","Usta":"Technician","Qabul qilish":"Accept","Pullik xizmat":"Paid service","Yetkazishni rejalash":"Plan delivery","Haydovchi":"Driver","Navbat":"Queue","Yo‘l xarajati":"Travel expense","Rejalash":"Schedule","PRO boshqaruv":"PRO management","Menejer / Konstruktor":"Manager / Designer","Shofyor boshqaruvi":"Driver management","Shartnoma Word":"Contract Word","Shartnoma PDF":"Contract PDF","Backup":"Backup","Ishchilar, buyurtmalar, ombor, ishlab chiqarish va moliya":"Workers, orders, inventory, production and finance","Toshkent vaqti":"Tashkent time","Dushanba":"Monday","Seshanba":"Tuesday","Chorshanba":"Wednesday","Payshanba":"Thursday","Juma":"Friday","Shanba":"Saturday","Yakshanba":"Sunday","yanvar":"January","fevral":"February","mart":"March","aprel":"April","may":"May","iyun":"June","iyul":"July","avgust":"August","sentabr":"September","oktabr":"October","noyabr":"November","dekabr":"December","Toshkent":"Tashkent","Ro‘yxatdan o‘tish":"Register","Akkauntim bor — kirish":"I have an account — sign in","Yangi shofyor — ro‘yxatdan o‘tish":"New driver — register","Rahbar kirishi":"Owner sign-in","Menga biriktirilgan yuklar":"My assigned deliveries","Hozircha yuk biriktirilmagan.":"No deliveries are assigned yet.","Orqaga":"Back","Qadoqlar":"Packages","Yetkazish navbati":"Delivery queue","Xarita tanlang":"Choose a map","Lokatsiyani o‘zingiz xohlagan xaritada oching.":"Open the location in your preferred map.","Yo‘lga chiqdim":"I have departed","Yetib keldim":"I have arrived","Yetkazib berdim":"Delivered","Shofyor login yaratish":"Create driver login","Akkaunt yaratish":"Create account","Yuk biriktirish":"Assign delivery","Qadoq soni":"Number of packages","Biriktirish":"Assign","Shofyor akkauntlari":"Driver accounts","Tasdiqlangan":"Approved","Kutilmoqda":"Pending","Tasdiqlash":"Approve","Bloklash":"Block","Biriktirilgan yuklar":"Assigned deliveries","Ishchi ro‘yxatdan o‘tishi":"Worker registration","Telefon raqamingiz":"Your phone number","Masalan":"Example","Kod olish":"Get code","Sinov kodi":"Test code","Haqiqiy SMS xizmati ulanmaguncha shu koddan foydalaning.":"Use this code until a real SMS service is connected.","Kodni kiritish":"Enter code","Kodni tasdiqlash":"Verify code","Telefonni tasdiqlash":"Verify phone","Yangi login":"New login","Yangi parol":"New password","Ro‘yxatdan o‘tdingiz":"Registration completed","Endi administrator akkauntingizni tasdiqlaydi. Tasdiqlangach login va parolingiz bilan kirasiz.":"The administrator will now approve your account. After approval, sign in with your login and password.","Kirish sahifasi":"Sign-in page","Ishchi kabineti":"Worker dashboard","Yangi ro‘yxatdan o‘tish":"New registration","HOZIRGI HOLAT":"CURRENT STATUS","ISHLAGAN KUN":"DAYS WORKED","JAMI SOAT":"TOTAL HOURS","Hozir ishlayotgan ishim":"My current task","Boshlangan vaqt":"Start time","Ishchi boshqaruvi":"Worker management","Ishchi kabinetlarini boshqarish":"Manage worker dashboards","ERP bosh sahifa":"ERP home","Yangi topshiriq":"New task","Topshiriq":"Task","Boshlanish rejasi":"Planned start","Tugash rejasi":"Planned end","Topshiriq berish":"Assign task","Ro‘yxatdan o‘tganlar":"Registered users","Ishchi":"Worker","dona":"pcs","komplekt":"set","metr":"metre","soat":"hour","yil":"year","kun":"day","daqiqa":"minute","safar":"trip","loyiha":"project","buyurtma":"order","list":"sheet","kg":"kg","m²":"m²","ta":"pcs","Akam":"For brother","Akril":"Acrylic","Asbob-uskunalar":"Tools and equipment","Bank xizmati":"Banking service","Benzin":"Petrol","Blok pitaniya":"Power supply","Bolt va gayka":"Bolt and nut","Bozorga borish":"Market trip","Bo‘yash":"Painting","Bo‘yoq":"Paint","Buxgalteriya":"Accounting","CNC Rover":"CNC Rover","Chiqindi olib ketish":"Waste removal","Chizma tayyorlash":"Drawing preparation","Click":"Click","DSP":"Chipboard","DVP":"Fibreboard","Dastur xarajati":"Software expense","Disk":"Disc","Dizayn":"Design","Dizel":"Diesel","Domen":"Domain","Ehtiyot qismlar":"Spare parts","Ekokoja":"Eco-leather","Elektr":"Electricity","Fanera":"Plywood","Favqulodda xarajat":"Emergency expense","Foto-video":"Photo and video","Freza":"Router bit","Frezalash":"Routing","Furnitura":"Hardware","Gaz":"Gas","Gazlift":"Gas lift","Grunt":"Primer","G‘ildirak":"Wheel","HDF":"HDF","Himoya vositalari":"Protective equipment","Hosting":"Hosting","Ijara":"Rent","Instagram reklama":"Instagram advertising","Internet":"Internet","Ish":"Work","Ish hajmiga haq":"Piece-rate pay","Ishchi kiyimi":"Workwear","Ishlab chiqarish":"Production","Kafolat":"Warranty","Kafolat ta’miri":"Warranty repair","Kantselyariya":"Stationery","Kartrij":"Cartridge","Keshbek":"Cashback","Kechikish kompensatsiyasi":"Delay compensation","Kimga":"Paid to","Km":"Km","Kompressor xarajati":"Compressor expense","Kompyuter ta’miri":"Computer repair","Ko‘tarma mexanizm":"Lifting mechanism","Kromka":"Edge band","Kromka urish":"Edge banding","Kunlik ish haqi":"Daily wage","LDSP":"Laminated chipboard","LED lenta":"LED strip","Lak":"Lacquer","Lazer":"Laser","MDF":"MDF","Magnit":"Magnet","Material chiqindisi":"Material waste","Mato":"Fabric","Mashina ta’miri":"Vehicle repair","Mijoz uyiga borish":"Customer site visit","Mijozga chegirma":"Customer discount","Montaj":"Installation","Moy almashtirish":"Oil change","Moylash vositalari":"Lubricants","Namuna tayyorlash":"Sample preparation","Napravlyayushiy":"Drawer runner","Narx":"Price","OLX reklama":"OLX advertising","Ona uchun":"For mother","Ota uchun":"For father","Ovqat puli":"Meal allowance","Oyna":"Glass","Oyna kesish":"Glass cutting","Oyna teshish":"Glass drilling","Oyoq":"Leg","Parking":"Parking","Payme":"Payme","Payvandlash":"Welding","Petlya":"Hinge","Porolon":"Foam","Printer qog‘ozi":"Printer paper","Profil":"Profile","Qadoqlash materiali":"Packaging material","Qarzdorlik yopish":"Debt repayment","Qavatga ko‘tarish":"Carry upstairs","Qayta ishlash xarajati":"Rework expense","Qaytarilgan pul":"Refund","Qo‘riqlash":"Security","Qo‘shimcha ish":"Additional work","Qo‘shimcha ish haqi":"Additional pay","Raspil":"Panel cutting","Raspildan olib kelish":"Collection from cutting shop","Razmer olish":"Measurement","Reklama":"Advertising","Ruchka":"Handle","SMS xizmati":"SMS service","Samorez":"Self-tapping screw","Sayqalash":"Sanding","Seh":"Workshop","Seh uchun":"For workshop","Servis":"Service","Shina":"Tyre","Shisha":"Glass","Shpaklyovka":"Putty","Silikon":"Silicone","Sim va elektr jihozlari":"Wiring and electrical equipment","Soatbay haq":"Hourly pay","Soliq":"Tax","Stanok ta’miri":"Machine repair","Suv":"Water","Sverlo":"Drill bit","Tashqi ustaga berilgan ish":"Outsourced work","Telegram reklama":"Telegram advertising","Teshish":"Drilling","Texnika xavfsizligi":"Workplace safety","Telefon puli":"Phone expense","Tozalash":"Cleaning","Tortma mexanizmi":"Drawer mechanism","Transport":"Transport","Uy uchun":"For home","Xizmat safari":"Business trip","Yaroqsiz mahsulot":"Defective product","Yelim":"Glue","Yetkazib berish":"Delivery","Yo‘l haqi":"Road fee","Yo‘l puli":"Travel allowance","Yuk tashish":"Freight","Yuvish":"Washing","Zamok":"Lock","Zımpara":"Sandpaper"}};\nconst STORE=\'pharm_mebel_language\';\nlet current=(localStorage.getItem(STORE)||\'uz\').toLowerCase();\nif(![\'uz\',\'ru\',\'en\'].includes(current))current=\'uz\';\nlet busy=false;\nconst originals=new WeakMap();\nconst attrOriginals=new WeakMap();\nconst ordered={};\nfor(const lang of [\'ru\',\'en\']) ordered[lang]=Object.keys(DICT[lang]).sort((a,b)=>b.length-a.length);\nfunction ignored(node){\n const e=node.nodeType===1?node:node.parentElement;\n return !!(e&&e.closest&&e.closest(\'[data-pharm-i18n-ignore],script,style,code,pre,textarea\'));\n}\nfunction translateString(value,lang){\n if(lang===\'uz\'||value===null||value===undefined)return String(value??\'\');\n const raw=String(value); const lead=(raw.match(/^\\s*/)||[\'\'])[0]; const tail=(raw.match(/\\s*$/)||[\'\'])[0];\n const core=raw.slice(lead.length,raw.length-tail.length);\n if(!core)return raw;\n const exact=DICT[lang][core];\n if(exact!==undefined)return lead+exact+tail;\n let out=core;\n for(const key of ordered[lang]){\n   if(key.length<2||!out.includes(key))continue;\n   out=out.split(key).join(DICT[lang][key]);\n }\n return lead+out+tail;\n}\nfunction textNode(node){\n if(!node||node.nodeType!==3||ignored(node)||!node.nodeValue.trim())return;\n const rec=originals.get(node);\n let source;\n if(!rec||node.nodeValue!==rec.last){source=node.nodeValue;}else{source=rec.source;}\n const next=translateString(source,current);\n originals.set(node,{source:source,last:next});\n if(node.nodeValue!==next){busy=true;node.nodeValue=next;busy=false;}\n}\nfunction attributes(el){\n if(!el||el.nodeType!==1||ignored(el))return;\n let rec=attrOriginals.get(el)||{};\n const attrs=[\'placeholder\',\'title\',\'aria-label\'];\n if(el.matches(\'input[type="button"],input[type="submit"],input[type="reset"]\'))attrs.push(\'value\');\n for(const name of attrs){\n   if(!el.hasAttribute(name))continue;\n   const currentValue=el.getAttribute(name)||\'\';\n   const old=rec[name];\n   const source=(!old||currentValue!==old.last)?currentValue:old.source;\n   const next=translateString(source,current);\n   rec[name]={source:source,last:next};\n   if(currentValue!==next)el.setAttribute(name,next);\n }\n attrOriginals.set(el,rec);\n}\nfunction walk(root){\n if(!root)return;\n if(root.nodeType===3){textNode(root);return;}\n if(root.nodeType!==1&&root.nodeType!==9&&root.nodeType!==11)return;\n if(root.nodeType===1){if(ignored(root))return;attributes(root);}\n const walker=document.createTreeWalker(root,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT);\n let n; while((n=walker.nextNode())){if(n.nodeType===3)textNode(n);else attributes(n);}\n}\nconst originalTitle=document.title;\nfunction apply(lang){\n current=lang;localStorage.setItem(STORE,lang);document.documentElement.lang=lang;\n walk(document.body);\n document.title=lang===\'uz\'?originalTitle:translateString(originalTitle,lang);\n document.querySelectorAll(\'[data-pharm-lang]\').forEach(b=>b.classList.toggle(\'active\',b.dataset.pharmLang===lang));\n window.dispatchEvent(new CustomEvent(\'pharm-language-change\',{detail:{language:lang}}));\n}\nfunction start(){\n const box=document.getElementById(\'pharm-lang-box\');\n const actions=document.querySelector(\'.header-actions\');\n if(box&&actions){box.classList.add(\'pharm-lang-inline\');actions.prepend(box);}\n document.querySelectorAll(\'[data-pharm-lang]\').forEach(b=>b.addEventListener(\'click\',()=>apply(b.dataset.pharmLang)));\n const nativeAlert=window.alert.bind(window),nativeConfirm=window.confirm.bind(window),nativePrompt=window.prompt.bind(window);\n window.alert=(m)=>nativeAlert(translateString(m,current));\n window.confirm=(m)=>nativeConfirm(translateString(m,current));\n window.prompt=(m,d)=>nativePrompt(translateString(m,current),d);\n apply(current);\n const observer=new MutationObserver(records=>{\n   if(busy)return;\n   for(const r of records){\n     if(r.type===\'characterData\')textNode(r.target);\n     else for(const n of r.addedNodes)walk(n);\n   }\n });\n observer.observe(document.body,{subtree:true,childList:true,characterData:true});\n}\nif(document.readyState===\'loading\')document.addEventListener(\'DOMContentLoaded\',start);else start();\n})();\n</script>\n'
-
-@app.after_request
-def _pharm_inject_language_selector(response):
-    """Barcha HTML sahifalarga uch tilli tanlov va tarjima tizimini qo‘shadi."""
+def _secret_key() -> str:
+    env = os.environ.get("MEBEL360_KROY_SECRET")
+    if env:
+        return env
+    p = APP_DIR / ".kroy_secret"
+    if p.exists():
+        value = p.read_text("utf-8").strip()
+        if value:
+            return value
+    value = secrets.token_hex(32)
     try:
-        content_type = response.headers.get('Content-Type', '')
-        if response.status_code == 200 and 'text/html' in content_type.lower() and not response.direct_passthrough:
-            page = response.get_data(as_text=True)
-            if '</body>' in page.lower() and 'PHARM_MEBEL_3_LANGUAGE_SYSTEM_V1' not in page:
-                pos = page.lower().rfind('</body>')
-                page = page[:pos] + PHARM_I18N_WIDGET + page[pos:]
-                response.set_data(page)
-    except Exception:
+        p.write_text(value, encoding="utf-8")
+    except OSError:
         pass
-    return response
+    return value
 
 
-def get_db():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+app.secret_key = _secret_key()
 
+TASHKENT_TZ = ZoneInfo("Asia/Tashkent")
+MAX_LOGIN_ATTEMPTS = 5
+LOGIN_BLOCK_SECONDS = 15 * 60
 
-def init_db():
-    conn = get_db()
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS ishchilar (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ism TEXT NOT NULL,
-        familiya TEXT DEFAULT '',
-        telefon TEXT DEFAULT '',
-        lavozim TEXT DEFAULT '',
-        ishga_kirgan_sana TEXT DEFAULT '',
-        staj_yil REAL DEFAULT 0,
-        kunlik_stavka REAL DEFAULT 0,
-        oylik_maosh REAL DEFAULT 0,
-        sifat_ball REAL DEFAULT 5,
-        tezlik_ball REAL DEFAULT 5,
-        intizom_ball REAL DEFAULT 5,
-        izoh TEXT DEFAULT '',
-        faol INTEGER DEFAULT 1,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
 
-    CREATE TABLE IF NOT EXISTS ish_turlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nomi TEXT UNIQUE NOT NULL,
-        kategoriya TEXT DEFAULT 'Ish',
-        birlik TEXT DEFAULT 'dona',
-        standart_narx REAL DEFAULT 0,
-        faol INTEGER DEFAULT 1
-    );
+def tashkent_now() -> datetime:
+    return datetime.now(TASHKENT_TZ)
 
-    CREATE TABLE IF NOT EXISTS keldi_ketdi (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ishchi_id INTEGER NOT NULL,
-        sana TEXT NOT NULL,
-        keldi_vaqti TEXT NOT NULL,
-        ketdi_vaqti TEXT NOT NULL,
-        ish_soatlari REAL DEFAULT 0,
-        FOREIGN KEY (ishchi_id) REFERENCES ishchilar(id) ON DELETE CASCADE
-    );
 
-    CREATE TABLE IF NOT EXISTS ish_natijalari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ishchi_id INTEGER NOT NULL,
-        ish_turi_id INTEGER NOT NULL,
-        sana TEXT NOT NULL,
-        miqdor REAL DEFAULT 0,
-        birlik_narxi REAL DEFAULT 0,
-        jami_haq REAL DEFAULT 0,
-        buyurtma_kodi TEXT DEFAULT '',
-        izoh TEXT DEFAULT '',
-        FOREIGN KEY (ishchi_id) REFERENCES ishchilar(id) ON DELETE CASCADE,
-        FOREIGN KEY (ish_turi_id) REFERENCES ish_turlari(id)
-    );
+def now_iso() -> str:
+    return tashkent_now().isoformat(timespec="seconds")
 
-    CREATE TABLE IF NOT EXISTS tolovlar (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ishchi_id INTEGER NOT NULL,
-        sana TEXT NOT NULL,
-        miqdor REAL DEFAULT 0,
-        turi TEXT DEFAULT 'Avans',
-        tavsifi TEXT DEFAULT '',
-        FOREIGN KEY (ishchi_id) REFERENCES ishchilar(id) ON DELETE CASCADE
-    );
 
-    CREATE TABLE IF NOT EXISTS jarimalar (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ishchi_id INTEGER NOT NULL,
-        sana TEXT NOT NULL,
-        miqdor REAL DEFAULT 0,
-        sababi TEXT DEFAULT '',
-        FOREIGN KEY (ishchi_id) REFERENCES ishchilar(id) ON DELETE CASCADE
-    );
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "ha", "on", "y", "да"}
 
-    CREATE TABLE IF NOT EXISTS buyurtmalar (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        kod TEXT UNIQUE NOT NULL,
-        mijoz TEXT NOT NULL,
-        telefon TEXT DEFAULT '',
-        manzil TEXT DEFAULT '',
-        mahsulot TEXT DEFAULT '',
-        umumiy_narx REAL DEFAULT 0,
-        oldindan_tolov REAL DEFAULT 0,
-        tugash_sana TEXT DEFAULT '',
-        holat TEXT DEFAULT 'Yangi',
-        izoh TEXT DEFAULT '',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
 
-    CREATE TABLE IF NOT EXISTS shartnoma_versiyalari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyurtma_id INTEGER NOT NULL,
-        versiya INTEGER DEFAULT 1,
-        docx_fayl TEXT DEFAULT '',
-        pdf_fayl TEXT DEFAULT '',
-        yaratilgan_vaqt TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE
-    );
+def csrf_token() -> str:
+    token = session.get("_csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["_csrf_token"] = token
+    return token
 
-    CREATE TABLE IF NOT EXISTS buyurtma_bosqichlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyurtma_id INTEGER NOT NULL,
-        bosqich TEXT NOT NULL,
-        bajarildi INTEGER DEFAULT 0,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE,
-        UNIQUE(buyurtma_id, bosqich)
-    );
 
-    CREATE TABLE IF NOT EXISTS ombor (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nomi TEXT UNIQUE NOT NULL,
-        kategoriya TEXT DEFAULT '',
-        birlik TEXT DEFAULT 'dona',
-        qoldiq REAL DEFAULT 0,
-        min_qoldiq REAL DEFAULT 0,
-        narx REAL DEFAULT 0
-    );
+@app.context_processor
+def inject_template_helpers() -> dict[str, Any]:
+    return {"csrf_token": csrf_token}
 
-    CREATE TABLE IF NOT EXISTS ombor_harakat (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        material_id INTEGER NOT NULL,
-        sana TEXT NOT NULL,
-        turi TEXT NOT NULL,
-        miqdor REAL NOT NULL,
-        buyurtma_kodi TEXT DEFAULT '',
-        izoh TEXT DEFAULT '',
-        FOREIGN KEY (material_id) REFERENCES ombor(id) ON DELETE CASCADE
-    );
 
-    CREATE TABLE IF NOT EXISTS safarlar (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ishchi_id INTEGER NOT NULL,
-        sana TEXT NOT NULL,
-        mashina TEXT DEFAULT '',
-        qayerdan TEXT DEFAULT '',
-        qayerga TEXT DEFAULT '',
-        masofa_km REAL DEFAULT 0,
-        sabab TEXT DEFAULT '',
-        yonilgi REAL DEFAULT 0,
-        xarajat REAL DEFAULT 0,
-        FOREIGN KEY (ishchi_id) REFERENCES ishchilar(id) ON DELETE CASCADE
-    );
+@app.before_request
+def verify_csrf() -> None:
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return
+    expected = session.get("_csrf_token", "")
+    supplied = request.form.get("_csrf", "") or request.headers.get("X-CSRF-Token", "")
+    if not expected or not supplied or not secrets.compare_digest(str(expected), str(supplied)):
+        abort(400, description="Xavfsizlik tokeni eskirgan. Sahifani yangilab qayta urinib ko'ring.")
 
-    CREATE TABLE IF NOT EXISTS shofyor_akkauntlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ishchi_id INTEGER UNIQUE NOT NULL,
-        login TEXT UNIQUE NOT NULL,
-        parol_hash TEXT NOT NULL,
-        faol INTEGER DEFAULT 1,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (ishchi_id) REFERENCES ishchilar(id) ON DELETE CASCADE
-    );
 
-
-    CREATE TABLE IF NOT EXISTS xarajatlar (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        sana TEXT NOT NULL,
-        kategoriya TEXT NOT NULL,
-        miqdor REAL DEFAULT 0,
-        tavsifi TEXT DEFAULT '',
-        buyurtma_kodi TEXT DEFAULT '',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS bonuslar (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ishchi_id INTEGER NOT NULL,
-        sana TEXT NOT NULL,
-        miqdor REAL DEFAULT 0,
-        sababi TEXT DEFAULT '',
-        FOREIGN KEY (ishchi_id) REFERENCES ishchilar(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS ishchi_holatlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ishchi_id INTEGER NOT NULL,
-        sana TEXT NOT NULL,
-        turi TEXT NOT NULL,
-        izoh TEXT DEFAULT '',
-        FOREIGN KEY (ishchi_id) REFERENCES ishchilar(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS buyurtma_tolovlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyurtma_id INTEGER NOT NULL,
-        sana TEXT NOT NULL,
-        miqdor REAL DEFAULT 0,
-        turi TEXT DEFAULT 'To‘lov',
-        izoh TEXT DEFAULT '',
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS tayyor_mahsulot (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nomi TEXT NOT NULL,
-        kodi TEXT DEFAULT '',
-        rang TEXT DEFAULT '',
-        miqdor REAL DEFAULT 0,
-        birlik TEXT DEFAULT 'dona',
-        narx REAL DEFAULT 0,
-        izoh TEXT DEFAULT ''
-    );
-
-
-    CREATE TABLE IF NOT EXISTS mijozlar (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        fio TEXT NOT NULL,
-        telefon TEXT DEFAULT '',
-        pasport_id TEXT DEFAULT '',
-        manzil TEXT DEFAULT '',
-        rozilik_reklama INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS mijoz_akkauntlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        mijoz_id INTEGER,
-        telefon TEXT NOT NULL,
-        parol_hash TEXT DEFAULT '',
-        sms_tasdiq INTEGER DEFAULT 0,
-        faol INTEGER DEFAULT 1,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (mijoz_id) REFERENCES mijozlar(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS buyurtma_bosqich_hodisalari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyurtma_id INTEGER NOT NULL,
-        bosqich TEXT NOT NULL,
-        boshlandi TEXT DEFAULT '',
-        tugadi TEXT DEFAULT '',
-        ishchi_id INTEGER,
-        izoh TEXT DEFAULT '',
-        media_havola TEXT DEFAULT '',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE,
-        FOREIGN KEY (ishchi_id) REFERENCES ishchilar(id) ON DELETE SET NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS buyurtma_media (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyurtma_id INTEGER NOT NULL,
-        turi TEXT DEFAULT 'Rasm',
-        havola TEXT NOT NULL,
-        izoh TEXT DEFAULT '',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS buyurtma_tasdiqlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyurtma_id INTEGER NOT NULL,
-        turi TEXT NOT NULL,
-        holat TEXT DEFAULT 'Kutilmoqda',
-        izoh TEXT DEFAULT '',
-        tasdiqlagan TEXT DEFAULT '',
-        tasdiqlangan_vaqt TEXT DEFAULT '',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS keshbek_harakatlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        mijoz_telefon TEXT NOT NULL,
-        buyurtma_id INTEGER,
-        turi TEXT NOT NULL,
-        miqdor REAL DEFAULT 0,
-        amal_muddati TEXT DEFAULT '',
-        izoh TEXT DEFAULT '',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE SET NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS baholar (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyurtma_id INTEGER NOT NULL,
-        sifat INTEGER DEFAULT 5,
-        muddat INTEGER DEFAULT 5,
-        muomala INTEGER DEFAULT 5,
-        yetkazish INTEGER DEFAULT 5,
-        montaj INTEGER DEFAULT 5,
-        umumiy INTEGER DEFAULT 5,
-        izoh TEXT DEFAULT '',
-        rasm_havola TEXT DEFAULT '',
-        reklama_ruxsat INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS servis_murojaatlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyurtma_id INTEGER NOT NULL,
-        turi TEXT DEFAULT 'Servis',
-        muammo TEXT NOT NULL,
-        media_havola TEXT DEFAULT '',
-        holat TEXT DEFAULT 'Qabul qilindi',
-        usta_id INTEGER,
-        servis_sana TEXT DEFAULT '',
-        pullik INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE,
-        FOREIGN KEY (usta_id) REFERENCES ishchilar(id) ON DELETE SET NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS kafolatlar (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyurtma_id INTEGER UNIQUE NOT NULL,
-        boshlanish TEXT DEFAULT '',
-        tugash TEXT DEFAULT '',
-        shartlar TEXT DEFAULT '',
-        qr_token TEXT DEFAULT '',
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS qoshimcha_ishlar (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyurtma_id INTEGER NOT NULL,
-        nomi TEXT NOT NULL,
-        summa REAL DEFAULT 0,
-        qoshimcha_kun INTEGER DEFAULT 0,
-        mijoz_tasdiq INTEGER DEFAULT 0,
-        kim_kiritdi TEXT DEFAULT '',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS ombor_rezervlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyurtma_id INTEGER NOT NULL,
-        material_id INTEGER NOT NULL,
-        miqdor REAL DEFAULT 0,
-        holat TEXT DEFAULT 'Rezerv',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE,
-        FOREIGN KEY (material_id) REFERENCES ombor(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS buyurtma_tannarxi (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyurtma_id INTEGER UNIQUE NOT NULL,
-        material REAL DEFAULT 0,
-        ishchi REAL DEFAULT 0,
-        boyoq REAL DEFAULT 0,
-        oyna REAL DEFAULT 0,
-        furnitura REAL DEFAULT 0,
-        transport REAL DEFAULT 0,
-        elektr REAL DEFAULT 0,
-        tashqi_xizmat REAL DEFAULT 0,
-        boshqa REAL DEFAULT 0,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS tizim_xabarlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        foydalanuvchi_turi TEXT DEFAULT '',
-        foydalanuvchi_id INTEGER,
-        buyurtma_id INTEGER,
-        mavzu TEXT NOT NULL,
-        matn TEXT NOT NULL,
-        kanal TEXT DEFAULT 'Sayt',
-        oqildi INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS foydalanuvchi_rollari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nomi TEXT UNIQUE NOT NULL,
-        huquqlar TEXT DEFAULT ''
-    );
-
-
-    CREATE TABLE IF NOT EXISTS admin_akkauntlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        login TEXT UNIQUE NOT NULL,
-        parol_hash TEXT NOT NULL,
-        faol INTEGER DEFAULT 1,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS audit_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        sana_vaqt TEXT DEFAULT CURRENT_TIMESTAMP,
-        amal TEXT NOT NULL,
-        tafsilot TEXT DEFAULT ''
-    );
-
-    CREATE TABLE IF NOT EXISTS xodim_akkauntlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ism TEXT NOT NULL,
-        login TEXT UNIQUE NOT NULL,
-        parol_hash TEXT NOT NULL,
-        rol TEXT NOT NULL,
-        faol INTEGER DEFAULT 1,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS buyurtma_hujjatlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyurtma_id INTEGER NOT NULL,
-        nomi TEXT NOT NULL,
-        fayl_nomi TEXT NOT NULL,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS ishchi_akkauntlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ishchi_id INTEGER UNIQUE,
-        telefon TEXT UNIQUE NOT NULL,
-        login TEXT UNIQUE,
-        parol_hash TEXT DEFAULT '',
-        tasdiqlangan INTEGER DEFAULT 0,
-        admin_tasdiq INTEGER DEFAULT 0,
-        faol INTEGER DEFAULT 1,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (ishchi_id) REFERENCES ishchilar(id) ON DELETE SET NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS ishchi_otp (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telefon TEXT NOT NULL,
-        kod_hash TEXT NOT NULL,
-        muddati TEXT NOT NULL,
-        ishlatildi INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS ishchi_topshiriqlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ishchi_id INTEGER NOT NULL,
-        buyurtma_kodi TEXT DEFAULT '',
-        ish_turi TEXT NOT NULL,
-        tavsif TEXT DEFAULT '',
-        holat TEXT DEFAULT 'Yangi',
-        progress INTEGER DEFAULT 0,
-        sana TEXT NOT NULL,
-        tugash_sana TEXT DEFAULT '',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (ishchi_id) REFERENCES ishchilar(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS mijoz_baholari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyurtma_id INTEGER NOT NULL,
-        sifat INTEGER DEFAULT 5, muddat INTEGER DEFAULT 5, muomala INTEGER DEFAULT 5,
-        yetkazish INTEGER DEFAULT 5, montaj INTEGER DEFAULT 5, izoh TEXT DEFAULT '',
-        reklama_ruxsat INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE
-    );
-    CREATE TABLE IF NOT EXISTS servis_murojaatlari (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, buyurtma_id INTEGER NOT NULL,
-        turi TEXT DEFAULT 'Servis', muammo TEXT NOT NULL, holat TEXT DEFAULT 'Qabul qilindi',
-        servis_sana TEXT DEFAULT '', usta TEXT DEFAULT '', izoh TEXT DEFAULT '',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE
-    );
-    CREATE TABLE IF NOT EXISTS qoshimcha_ishlar (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, buyurtma_id INTEGER NOT NULL,
-        nomi TEXT NOT NULL, summa REAL DEFAULT 0, qoshimcha_kun INTEGER DEFAULT 0,
-        tasdiq INTEGER DEFAULT 0, izoh TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE
-    );
-    CREATE TABLE IF NOT EXISTS yetkazishlar (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        buyurtma_id INTEGER NOT NULL,
-        haydovchi_id INTEGER,
-        sana TEXT DEFAULT '',
-        navbat INTEGER DEFAULT 1,
-        mashina TEXT DEFAULT '',
-        holat TEXT DEFAULT 'Rejalashtirilgan',
-        yolga_chiqdi TEXT DEFAULT '',
-        yetib_keldi TEXT DEFAULT '',
-        topshirildi TEXT DEFAULT '',
-        yetkazildi TEXT DEFAULT '',
-        benzin REAL DEFAULT 0,
-        yol_xarajati REAL DEFAULT 0,
-        izoh TEXT DEFAULT '',
-        qadoq_soni INTEGER DEFAULT 1,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE,
-        FOREIGN KEY (haydovchi_id) REFERENCES ishchilar(id) ON DELETE SET NULL
-    );
-    """)
-
-    roles=[
-        ("Rahbar","all"),("Administrator","orders,customers,workers"),
-        ("Menejer","orders,customers,payments"),("Konstruktor","drawings,stages,files"),
-        ("Hisobchi","finance,payments,expenses"),("Omborchi","stock"),
-        ("Ishchi","own_tasks"),("Bo‘lim boshlig‘i","department"),
-        ("Shofyor","own_deliveries"),("Mijoz","own_orders")
-    ]
-    conn.executemany("INSERT OR IGNORE INTO foydalanuvchi_rollari(nomi,huquqlar) VALUES(?,?)",roles)
-
-    ishlar = [
-        ("Kesish","Ishlab chiqarish","dona"),("Bo‘yash","Ishlab chiqarish","dona"),
-        ("Yig‘ish","Ishlab chiqarish","dona"),("Roverda ishlash","Stanok","soat"),
-        ("Razmer olish","Xizmat","buyurtma"),("Kromka urish","Ishlab chiqarish","metr"),
-        ("Sayqalash","Ishlab chiqarish","dona"),("Teshish","Ishlab chiqarish","dona"),
-        ("Lazer","Stanok","soat"),("Sehda yig‘ish","Ishlab chiqarish","dona"),
-        ("Seh ishlari","Umumiy","soat"),("Yangi loyihalar","Loyiha","loyiha"),
-        ("Frezalash","Stanok","soat"),("Yumshoq mebel","Ishlab chiqarish","dona"),
-        ("Shofyorlik","Transport","safar"),("Ish vaqtida hordiq","Tanaffus","daqiqa"),
-        ("Bozorga tushish","Xizmat","safar"),("Qadoqlash","Ishlab chiqarish","dona"),
-        ("Oyna o‘rnatish","Ishlab chiqarish","dona"),("Oyna teshish","Ishlab chiqarish","dona"),
-        ("Tumba yig‘ish","Mebel turi","dona"),("Oyoq kiyim shkafi yig‘ish","Mebel turi","dona"),
-        ("Kravot yig‘ish","Mebel turi","dona"),("Shkaf yig‘ish","Mebel turi","dona"),
-        ("Kuxniy yig‘ish","Mebel turi","dona"),("Kamod yig‘ish","Mebel turi","dona"),
-        ("Buyurtmani raspildan olib kelish","Transport","safar"),
-        ("Abed","Tanaffus","daqiqa"),("Tanaffus","Tanaffus","daqiqa"),
-        ("Namoz vaqti","Tanaffus","daqiqa")
-    ]
-    conn.executemany(
-        "INSERT OR IGNORE INTO ish_turlari(nomi,kategoriya,birlik) VALUES(?,?,?)", ishlar
-    )
-
-
-    # PHARM_MEBEL_SEH_MIGRATION_V2_SAFE
-    # Eski bazadagi "Sex" yozuvlarini ma'lumot yo'qotmasdan "Seh" ga o‘tkazadi.
-    # Agar yangi nom avvaldan mavjud bo‘lsa, takroriy yozuvlar xavfsiz birlashtiriladi.
-
-    old_work_types = conn.execute("""
-        SELECT id, nomi FROM ish_turlari
-        WHERE nomi LIKE '%Sex%' OR nomi LIKE '%sex%' OR nomi LIKE '%SEX%'
-    """).fetchall()
-
-    for old_work in old_work_types:
-        old_id = int(old_work["id"])
-        old_name = str(old_work["nomi"] or "")
-        new_name = (old_name.replace("Sex", "Seh")
-                            .replace("sex", "seh")
-                            .replace("SEX", "SEH"))
-
-        existing_work = conn.execute(
-            "SELECT id FROM ish_turlari WHERE nomi=? AND id<>?",
-            (new_name, old_id)
-        ).fetchone()
-
-        if existing_work:
-            new_id = int(existing_work["id"])
-            # Eski ish natijalarini yangi ish turiga bog‘laymiz.
-            conn.execute(
-                "UPDATE ish_natijalari SET ish_turi_id=? WHERE ish_turi_id=?",
-                (new_id, old_id)
-            )
-            conn.execute("DELETE FROM ish_turlari WHERE id=?", (old_id,))
-        else:
-            conn.execute(
-                "UPDATE ish_turlari SET nomi=? WHERE id=?",
-                (new_name, old_id)
-            )
-
-    # Matn ko‘rinishida saqlangan topshiriqlar.
-    conn.execute("""
-        UPDATE ishchi_topshiriqlari
-        SET ish_turi=REPLACE(REPLACE(REPLACE(ish_turi,'Sex','Seh'),'sex','seh'),'SEX','SEH')
-        WHERE ish_turi LIKE '%Sex%' OR ish_turi LIKE '%sex%' OR ish_turi LIKE '%SEX%'
-    """)
-
-    # Buyurtma bosqichlarida bir xil yangi nom mavjud bo‘lsa, bajarilgan holatini birlashtiramiz.
-    old_stages = conn.execute("""
-        SELECT id, buyurtma_id, bosqich, bajarildi
-        FROM buyurtma_bosqichlari
-        WHERE bosqich LIKE '%Sex%' OR bosqich LIKE '%sex%' OR bosqich LIKE '%SEX%'
-    """).fetchall()
-
-    for old_stage in old_stages:
-        old_stage_id = int(old_stage["id"])
-        order_id = int(old_stage["buyurtma_id"])
-        old_stage_name = str(old_stage["bosqich"] or "")
-        new_stage_name = (old_stage_name.replace("Sex", "Seh")
-                                        .replace("sex", "seh")
-                                        .replace("SEX", "SEH"))
-
-        existing_stage = conn.execute("""
-            SELECT id, bajarildi FROM buyurtma_bosqichlari
-            WHERE buyurtma_id=? AND bosqich=? AND id<>?
-        """, (order_id, new_stage_name, old_stage_id)).fetchone()
-
-        if existing_stage:
-            merged_done = max(
-                int(existing_stage["bajarildi"] or 0),
-                int(old_stage["bajarildi"] or 0)
-            )
-            conn.execute(
-                "UPDATE buyurtma_bosqichlari SET bajarildi=? WHERE id=?",
-                (merged_done, int(existing_stage["id"]))
-            )
-            conn.execute(
-                "DELETE FROM buyurtma_bosqichlari WHERE id=?",
-                (old_stage_id,)
-            )
-        else:
-            conn.execute(
-                "UPDATE buyurtma_bosqichlari SET bosqich=? WHERE id=?",
-                (new_stage_name, old_stage_id)
-            )
-
-    conn.execute("""
-        UPDATE buyurtma_bosqich_hodisalari
-        SET bosqich=REPLACE(REPLACE(REPLACE(bosqich,'Sex','Seh'),'sex','seh'),'SEX','SEH')
-        WHERE bosqich LIKE '%Sex%' OR bosqich LIKE '%sex%' OR bosqich LIKE '%SEX%'
-    """)
-
-    materials = [
-        ("MDF 18 mm","Plita","list",0,5,0),
-        ("MDF 16 mm","Plita","list",0,5,0),
-        ("Kromka","Kromka","metr",0,100,0),
-        ("Furnitura","Furnitura","dona",0,50,0),
-        ("Bo‘yoq","Bo‘yoq","kg",0,10,0),
-        ("Oyna","Oyna","m²",0,5,0),
-        ("Akril","Plita","list",0,3,0)
-    ]
-    conn.executemany(
-        "INSERT OR IGNORE INTO ombor(nomi,kategoriya,birlik,qoldiq,min_qoldiq,narx) VALUES(?,?,?,?,?,?)",
-        materials
-    )
-    # V5 migratsiya: ishchining maxfiy pasport ma'lumotlari
-    worker_cols=[r[1] for r in conn.execute("PRAGMA table_info(ishchilar)").fetchall()]
-    worker_new_cols={
-        "pasport":"TEXT DEFAULT ''",
-        "jshshir":"TEXT DEFAULT ''",
-        "tugilgan_sana":"TEXT DEFAULT ''",
-        "yashash_manzil":"TEXT DEFAULT ''",
-        "pasport_berilgan_sana":"TEXT DEFAULT ''",
-        "pasport_bergan":"TEXT DEFAULT ''",
-        "favqulodda_telefon":"TEXT DEFAULT ''"
-    }
-    for col,ctype in worker_new_cols.items():
-        if col not in worker_cols:
-            conn.execute(f"ALTER TABLE ishchilar ADD COLUMN {col} {ctype}")
-
-    # V5 migratsiya: xarajat tafsilotlari
-    expense_cols=[r[1] for r in conn.execute("PRAGMA table_info(xarajatlar)").fetchall()]
-    expense_new_cols={
-        "xarajat_nomi":"TEXT DEFAULT ''",
-        "kimga_berildi":"TEXT DEFAULT ''",
-        "chek_havola":"TEXT DEFAULT ''"
-    }
-    for col,ctype in expense_new_cols.items():
-        if col not in expense_cols:
-            conn.execute(f"ALTER TABLE xarajatlar ADD COLUMN {col} {ctype}")
-
-    # V4.5 migratsiya: shofyor ro'yxatdan o'tishi va admin tasdig'i
-    driver_cols=[r[1] for r in conn.execute("PRAGMA table_info(shofyor_akkauntlari)").fetchall()]
-    if "telefon" not in driver_cols:
-        conn.execute("ALTER TABLE shofyor_akkauntlari ADD COLUMN telefon TEXT DEFAULT ''")
-    if "admin_tasdiq" not in driver_cols:
-        conn.execute("ALTER TABLE shofyor_akkauntlari ADD COLUMN admin_tasdiq INTEGER DEFAULT 0")
-
-    # V4.4.2 migratsiya: yetkazishlar jadvalini eski va yangi tizimga moslash
-    y_cols=[r[1] for r in conn.execute("PRAGMA table_info(yetkazishlar)").fetchall()]
-    required_y_cols={"haydovchi_id","sana","navbat","mashina","holat","yolga_chiqdi",
-                     "yetib_keldi","topshirildi","yetkazildi","benzin","yol_xarajati",
-                     "izoh","qadoq_soni","created_at"}
-    if not required_y_cols.issubset(set(y_cols)):
-        conn.execute("PRAGMA foreign_keys = OFF")
-        conn.execute("""
-            CREATE TABLE yetkazishlar_yangi (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                buyurtma_id INTEGER NOT NULL,
-                haydovchi_id INTEGER,
-                sana TEXT DEFAULT '',
-                navbat INTEGER DEFAULT 1,
-                mashina TEXT DEFAULT '',
-                holat TEXT DEFAULT 'Rejalashtirilgan',
-                yolga_chiqdi TEXT DEFAULT '',
-                yetib_keldi TEXT DEFAULT '',
-                topshirildi TEXT DEFAULT '',
-                yetkazildi TEXT DEFAULT '',
-                benzin REAL DEFAULT 0,
-                yol_xarajati REAL DEFAULT 0,
-                izoh TEXT DEFAULT '',
-                qadoq_soni INTEGER DEFAULT 1,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE,
-                FOREIGN KEY (haydovchi_id) REFERENCES ishchilar(id) ON DELETE SET NULL
-            )
-        """)
-        old_cols=set(y_cols)
-        rows=conn.execute("SELECT * FROM yetkazishlar").fetchall()
-        for r in rows:
-            def rv(name, default=None):
-                return r[name] if name in old_cols else default
-            driver_id=rv("haydovchi_id")
-            if driver_id is None:
-                driver_id=rv("shofyor_id")
-            conn.execute("""
-                INSERT INTO yetkazishlar_yangi
-                (id,buyurtma_id,haydovchi_id,sana,navbat,mashina,holat,yolga_chiqdi,
-                 yetib_keldi,topshirildi,yetkazildi,benzin,yol_xarajati,izoh,qadoq_soni,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,(
-                rv("id"),rv("buyurtma_id"),driver_id,
-                rv("sana",_tashkent_today()) or _tashkent_today(),
-                rv("navbat",1) or 1,rv("mashina","") or "",
-                rv("holat","Rejalashtirilgan") or "Rejalashtirilgan",
-                rv("yolga_chiqdi","") or "",rv("yetib_keldi","") or "",
-                rv("topshirildi","") or "",rv("yetkazildi","") or "",
-                rv("benzin",0) or 0,rv("yol_xarajati",0) or 0,
-                rv("izoh","") or "",rv("qadoq_soni",1) or 1,
-                rv("created_at",_tashkent_now().strftime("%Y-%m-%d %H:%M:%S"))
-            ))
-        conn.execute("DROP TABLE yetkazishlar")
-        conn.execute("ALTER TABLE yetkazishlar_yangi RENAME TO yetkazishlar")
-        conn.execute("PRAGMA foreign_keys = ON")
-
-    # V4.4 migratsiya: ishchi topshirig'ining haqiqiy boshlanish va tugash vaqti
-    task_cols=[r[1] for r in conn.execute("PRAGMA table_info(ishchi_topshiriqlari)").fetchall()]
-    if "boshlandi_vaqt" not in task_cols:
-        conn.execute("ALTER TABLE ishchi_topshiriqlari ADD COLUMN boshlandi_vaqt TEXT DEFAULT ''")
-    if "tugadi_vaqt" not in task_cols:
-        conn.execute("ALTER TABLE ishchi_topshiriqlari ADD COLUMN tugadi_vaqt TEXT DEFAULT ''")
-
-    # V4.2 migratsiya: xarajat to'lov usuli
-    xarajat_cols=[r[1] for r in conn.execute("PRAGMA table_info(xarajatlar)").fetchall()]
-    if "tolov_usuli" not in xarajat_cols:
-        conn.execute("ALTER TABLE xarajatlar ADD COLUMN tolov_usuli TEXT DEFAULT 'Naqd'")
-
-    # V5.0.6 migratsiya: shartnoma uchun qo'shimcha buyurtma ma'lumotlari
-    order_contract_cols=[r[1] for r in conn.execute("PRAGMA table_info(buyurtmalar)").fetchall()]
-    order_contract_new={
-        "pasport_id":"TEXT DEFAULT ''",
-        "olcham":"TEXT DEFAULT ''",
-        "soni":"INTEGER DEFAULT 1",
-        "material":"TEXT DEFAULT ''",
-        "rang":"TEXT DEFAULT ''",
-        "tolov_usuli":"TEXT DEFAULT 'Naqd'",
-        "oraliq_tolov":"REAL DEFAULT 0",
-        "montaj":"TEXT DEFAULT 'Kiritilgan'",
-        "yetkazish":"TEXT DEFAULT 'Kiritilgan'",
-        "kafolat_muddati":"TEXT DEFAULT '12 oy'"
-    }
-    for col,ctype in order_contract_new.items():
-        if col not in order_contract_cols:
-            conn.execute(f"ALTER TABLE buyurtmalar ADD COLUMN {col} {ctype}")
-
-    # V3 migratsiya: mijoz kuzatuv tokeni
-    cols=[r[1] for r in conn.execute("PRAGMA table_info(buyurtmalar)").fetchall()]
-    if "tracking_token" not in cols:
-        conn.execute("ALTER TABLE buyurtmalar ADD COLUMN tracking_token TEXT DEFAULT ''")
-    for row in conn.execute("SELECT id FROM buyurtmalar WHERE tracking_token IS NULL OR tracking_token='' ").fetchall():
-        conn.execute("UPDATE buyurtmalar SET tracking_token=? WHERE id=?",(secrets.token_urlsafe(8),row[0]))
-    # V4 migratsiya: mijoz, chegirma, keshbek, kafolat va lokatsiya ustunlari
-    order_cols={r[1] for r in conn.execute("PRAGMA table_info(buyurtmalar)").fetchall()}
-    migrations={
-      "boshlanish_sana":"TEXT DEFAULT ''", "taxminiy_sana":"TEXT DEFAULT ''",
-      "kechikish_foiz":"REAL DEFAULT 0", "maks_chegirma_foiz":"REAL DEFAULT 20",
-      "kechikish_turi":"TEXT DEFAULT 'Korxona'", "keshbek_foiz":"REAL DEFAULT 0",
-      "keshbek_summa":"REAL DEFAULT 0", "keshbek_amal_sana":"TEXT DEFAULT ''",
-      "kafolat_boshlanish":"TEXT DEFAULT ''", "kafolat_tugash":"TEXT DEFAULT ''",
-      "kafolat_sharti":"TEXT DEFAULT ''", "lokatsiya":"TEXT DEFAULT ''",
-      "moljal":"TEXT DEFAULT ''", "qavat":"TEXT DEFAULT ''", "lift":"TEXT DEFAULT ''",
-      "katta_mashina":"TEXT DEFAULT ''", "masul_xodim":"TEXT DEFAULT ''",
-      "bloklangan":"INTEGER DEFAULT 0"
-    }
-    for col,typ in migrations.items():
-        if col not in order_cols:
-            conn.execute(f"ALTER TABLE buyurtmalar ADD COLUMN {col} {typ}")
-    stage_cols={r[1] for r in conn.execute("PRAGMA table_info(buyurtma_bosqichlari)").fetchall()}
-    for col,typ in {"boshlanish_vaqti":"TEXT DEFAULT ''","tugash_vaqti":"TEXT DEFAULT ''","ishchi":"TEXT DEFAULT ''","izoh":"TEXT DEFAULT ''","media_url":"TEXT DEFAULT ''"}.items():
-        if col not in stage_cols: conn.execute(f"ALTER TABLE buyurtma_bosqichlari ADD COLUMN {col} {typ}")
-    # ADMIN_XAVFSIZLIK_V1
-    # Eski ochiq admin parolini bir marta shifrlab bazaga ko'chiradi.
-    # Keyingi ishga tushirishlarda parol hech qachon TXT yoki CMDda ko'rsatilmaydi.
-    admin_login = (os.environ.get("PHARM_ERP_USER", "admin") or "admin").strip()
-    admin_row = conn.execute(
-        "SELECT id FROM admin_akkauntlari WHERE login=? LIMIT 1",
-        (admin_login,),
-    ).fetchone()
-    old_password_path = os.path.join(_APP_DIR, "admin_parol.txt")
-    if not admin_row:
-        bootstrap_password = (os.environ.get("PHARM_ERP_PASSWORD") or "").strip()
-        migrated_from_txt = False
-        if not bootstrap_password and os.path.exists(old_password_path):
-            try:
-                with open(old_password_path, "r", encoding="utf-8") as f:
-                    bootstrap_password = f.read().strip()
-                migrated_from_txt = bool(bootstrap_password)
-            except OSError:
-                bootstrap_password = ""
-        if bootstrap_password:
-            conn.execute(
-                "INSERT INTO admin_akkauntlari(login,parol_hash,faol) VALUES(?,?,1)",
-                (admin_login, generate_password_hash(bootstrap_password)),
-            )
-            if migrated_from_txt:
-                try:
-                    os.remove(old_password_path)
-                except OSError:
-                    pass
-    elif os.path.exists(old_password_path):
-        # Bazada xavfsiz akkaunt mavjud bo'lsa, eski ochiq parol fayli kerak emas.
+def create_database_backup() -> Path | None:
+    """Bazani har muhim o'zgarishdan keyin kunlik nusxaga xavfsiz yangilaydi."""
+    try:
+        if str(DB_PATH) == ":memory:" or not DB_PATH.exists():
+            return None
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        target = BACKUP_DIR / f"Mebel360_kroy_{tashkent_now():%Y-%m-%d}.db"
+        temp = target.with_suffix(".tmp")
+        source_conn = sqlite3.connect(DB_PATH)
+        backup_conn = sqlite3.connect(temp)
         try:
-            os.remove(old_password_path)
-        except OSError:
-            pass
+            source_conn.backup(backup_conn)
+        finally:
+            backup_conn.close()
+            source_conn.close()
+        os.replace(temp, target)
+        backups = sorted(BACKUP_DIR.glob("Mebel360_kroy_*.db"), key=lambda x: x.stat().st_mtime, reverse=True)
+        for old_backup in backups[BACKUP_KEEP_DAYS:]:
+            try:
+                old_backup.unlink()
+            except OSError:
+                pass
+        return target
+    except (OSError, sqlite3.Error):
+        return None
+
+
+def _decode_text_file(data: bytes) -> str:
+    for encoding in ("utf-8-sig", "cp1251", "cp866", "latin-1"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", "replace")
+
+
+def _header_key(value: str) -> str:
+    return re.sub(r"[^a-zа-яё0-9]+", "", value.strip().lower())
+
+
+def parse_table_parts(data: bytes) -> list[Part]:
+    """CSV/TXT jadvalidan detallarni o'qiydi. Ustun nomlari o'zbek/rus/inglizcha bo'lishi mumkin."""
+    text = _decode_text_file(data).strip()
+    if not text:
+        raise ValueError("CSV/TXT fayl bo'sh")
+    sample = text[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=";,\t|")
+        delimiter = dialect.delimiter
+    except csv.Error:
+        delimiter = ";" if ";" in sample else ("\t" if "\t" in sample else ",")
+    rows = [row for row in csv.reader(io.StringIO(text), delimiter=delimiter) if any(cell.strip() for cell in row)]
+    if not rows:
+        raise ValueError("CSV/TXT ichida ma'lumot topilmadi")
+
+    aliases = {
+        "name": {"name", "nom", "nomi", "detal", "detail", "наименование", "наим", "деталь"},
+        "length": {"length", "uzunlik", "dlina", "длина", "l"},
+        "width": {"width", "eni", "en", "shirina", "ширина", "w"},
+        "qty": {"qty", "quantity", "many", "soni", "dona", "количество", "колво", "кол"},
+        "rotate": {"rotate", "aylantirish", "povorot", "поворот"},
+        "edge_left": {"edgeleft", "left", "lborder", "chap", "лево", "левый"},
+        "edge_right": {"edgeright", "right", "rborder", "ong", "o'ng", "право", "правый"},
+        "edge_top": {"edgetop", "top", "tborder", "tepa", "верх"},
+        "edge_bottom": {"edgebottom", "bottom", "bborder", "past", "низ"},
+        "edges": {"edges", "edge", "kromka", "кромка"},
+    }
+    normalized_aliases = {key: {_header_key(v) for v in values} for key, values in aliases.items()}
+    first = [_header_key(x) for x in rows[0]]
+    has_header = any(cell in normalized_aliases["length"] | normalized_aliases["width"] for cell in first)
+    mapping: dict[str, int] = {}
+    start = 0
+    if has_header:
+        for idx, cell in enumerate(first):
+            for key, values in normalized_aliases.items():
+                if cell in values and key not in mapping:
+                    mapping[key] = idx
+        start = 1
+    else:
+        mapping = {"name": 0, "length": 1, "width": 2, "qty": 3, "rotate": 4, "edges": 5}
+
+    if "length" not in mapping or "width" not in mapping:
+        raise ValueError("Jadvalda uzunlik va en ustunlari topilmadi")
+
+    def cell(row: list[str], key: str, default: str = "") -> str:
+        idx = mapping.get(key)
+        return row[idx].strip() if idx is not None and idx < len(row) else default
+
+    parts: list[Part] = []
+    for row_no, row in enumerate(rows[start:], start + 1):
+        try:
+            length = int(float(cell(row, "length", "0").replace(" ", "").replace(",", ".")))
+            width = int(float(cell(row, "width", "0").replace(" ", "").replace(",", ".")))
+            qty = int(float(cell(row, "qty", "1").replace(" ", "").replace(",", ".")))
+        except ValueError:
+            raise ValueError(f"{row_no}-qatorda o'lcham yoki son noto'g'ri")
+        name = cell(row, "name", f"Detal {row_no}") or f"Detal {row_no}"
+        raw_edges = cell(row, "edges", "")
+        edge_tokens = {_header_key(token) for token in re.split(r"[,;/|+\s]+", raw_edges) if token.strip()}
+        parts.append(
+            Part(
+                uid=secrets.token_hex(4),
+                name=name[:80],
+                length=length,
+                width=width,
+                qty=qty,
+                rotate=_as_bool(cell(row, "rotate", "1"), True),
+                edge_left=_as_bool(cell(row, "edge_left")) or bool(edge_tokens & {"ch", "e1", "left", "chap", "l"}),
+                edge_right=_as_bool(cell(row, "edge_right")) or bool(edge_tokens & {"o", "e2", "right", "ong", "r"}),
+                edge_top=_as_bool(cell(row, "edge_top")) or bool(edge_tokens & {"t", "u1", "top", "tepa"}),
+                edge_bottom=_as_bool(cell(row, "edge_bottom")) or bool(edge_tokens & {"p", "u2", "bottom", "past"}),
+            )
+        )
+    if not parts:
+        raise ValueError("CSV/TXT ichidan yaroqli detallar topilmadi")
+    return validate_parts(parts)
+
+
+def validate_parts(parts: list[Part]) -> list[Part]:
+    if not parts:
+        raise ValueError("Kamida bitta detal kiriting")
+    if len(parts) > MAX_PART_TYPES:
+        raise ValueError(f"Detal turlari {MAX_PART_TYPES} tadan oshmasin")
+    total = 0
+    seen_uids: set[str] = set()
+    for index, part in enumerate(parts, 1):
+        part.name = str(part.name).strip()[:80]
+        if not part.name:
+            raise ValueError(f"{index}-detal nomi yozilmagan")
+        if not (MIN_PART_MM <= int(part.length) <= MAX_PART_MM):
+            raise ValueError(f"{part.name}: uzunlik {MIN_PART_MM}-{MAX_PART_MM} mm oralig'ida bo'lsin")
+        if not (MIN_PART_MM <= int(part.width) <= MAX_PART_MM):
+            raise ValueError(f"{part.name}: en {MIN_PART_MM}-{MAX_PART_MM} mm oralig'ida bo'lsin")
+        if not (1 <= int(part.qty) <= 999):
+            raise ValueError(f"{part.name}: soni 1-999 oralig'ida bo'lsin")
+        total += int(part.qty)
+        if total > MAX_TOTAL_PARTS:
+            raise ValueError(f"Jami detallar {MAX_TOTAL_PARTS} tadan oshmasin")
+        uid = re.sub(r"[^A-Za-z0-9_-]", "", str(part.uid))[:64]
+        if not uid or uid in seen_uids:
+            uid = secrets.token_hex(8)
+        part.uid = uid
+        seen_uids.add(uid)
+    return parts
+
+
+def save_sto_attachment(job_id: int, original_name: str, data: bytes) -> None:
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    safe = secure_filename(original_name) or "pro100.sto"
+    stored = f"job_{job_id}_{secrets.token_hex(8)}.sto"
+    path = UPLOAD_DIR / stored
+    path.write_bytes(data)
+    conn = get_db()
+    conn.execute(
+        """INSERT INTO kroy_attachments(job_id,kind,original_name,stored_name,size_bytes,created_at)
+           VALUES(?, 'PRO100_STO', ?, ?, ?, ?)""",
+        (job_id, safe[:200], stored, len(data), now_iso()),
+    )
+    # MEBEL360_KORXONA_MIGRATION_V1
+    # Eski ma'lumotlar bazasidagi Seh yozuvlarini ma'lumot yo'qotmasdan Korxonaga o'tkazadi.
+    _korxona_pairs = [
+        ('Seh uchun', 'Korxona uchun'), ('seh uchun', 'korxona uchun'), ('SEH UCHUN', 'KORXONA UCHUN'),
+        ('Sehda', 'Korxonada'), ('sehda', 'korxonada'), ('SEHDA', 'KORXONADA'),
+        ('Sehga', 'Korxonaga'), ('sehga', 'korxonaga'), ('SEHGA', 'KORXONAGA'),
+        ('Sehdan', 'Korxonadan'), ('sehdan', 'korxonadan'), ('SEHDAN', 'KORXONADAN'),
+        ('Sehning', 'Korxonaning'), ('sehning', 'korxonaning'), ('SEHNING', 'KORXONANING'),
+        ('Sehni', 'Korxonani'), ('sehni', 'korxonani'), ('SEHNI', 'KORXONANI'),
+        ('Sehlar', 'Korxonalar'), ('sehlar', 'korxonalar'), ('SEHLAR', 'KORXONALAR'),
+        ('Seh', 'Korxona'), ('seh', 'korxona'), ('SEH', 'KORXONA'),
+    ]
+    try:
+        _tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
+        for _table_row in _tables:
+            _table = str(_table_row[0] if not hasattr(_table_row, 'keys') else _table_row['name'])
+            _safe_table = _table.replace('\"', '\"\"')
+            _columns = conn.execute(f'PRAGMA table_info("{_safe_table}")').fetchall()
+            for _col in _columns:
+                _col_name = str(_col[1])
+                _col_type = str(_col[2] or '').upper()
+                if _col_type and 'TEXT' not in _col_type and 'CHAR' not in _col_type and 'CLOB' not in _col_type:
+                    continue
+                _safe_col = _col_name.replace('\"', '\"\"')
+                for _old, _new in _korxona_pairs:
+                    conn.execute(
+                        f'UPDATE "{_safe_table}" SET "{_safe_col}"=REPLACE("{_safe_col}", ?, ?) '
+                        f'WHERE "{_safe_col}" LIKE ?',
+                        (_old, _new, f'%{_old}%'),
+                    )
+    except Exception as _korxona_migration_error:
+        print('Korxona migratsiyasi ogohlantirishi:', _korxona_migration_error)
 
     conn.commit()
     conn.close()
 
 
-
-def _safe_filename(value):
-    value=str(value or '').strip()
-    value=re.sub(r'[^A-Za-z0-9_-]+','_',value)
-    return value.strip('_') or 'buyurtma'
-
-
-def _contract_dir():
-    path=os.path.join(os.path.dirname(os.path.abspath(__file__)),'shartnomalar')
-    os.makedirs(path,exist_ok=True)
-    return path
-
-
-def _fmt_money(value):
-    try:
-        return f"{float(value or 0):,.0f}".replace(","," ")
-    except Exception:
-        return "0"
-
-
-def _add_docx_field(document,label,value):
-    p=document.add_paragraph()
-    p.paragraph_format.space_after=Pt(3)
-    r=p.add_run(label+": ")
-    r.bold=True
-    p.add_run(str(value or "________________"))
-
-
-def generate_order_contract(oid):
-    c=get_db()
-    order=c.execute("SELECT * FROM buyurtmalar WHERE id=?",(oid,)).fetchone()
-    if not order:
-        c.close()
-        raise ValueError("Buyurtma topilmadi")
-    last=c.execute("SELECT COALESCE(MAX(versiya),0) FROM shartnoma_versiyalari WHERE buyurtma_id=?",(oid,)).fetchone()[0]
-    version=int(last or 0)+1
-    base=f"{_safe_filename(order['kod'])}_shartnoma_v{version}"
-    docx_path=os.path.join(_contract_dir(),base+".docx")
-    pdf_path=os.path.join(_contract_dir(),base+".pdf")
-
-    # DOCX
-    doc=Document()
-    section=doc.sections[0]
-    section.top_margin=Cm(1.5); section.bottom_margin=Cm(1.5)
-    section.left_margin=Cm(1.7); section.right_margin=Cm(1.7)
-    styles=doc.styles
-    styles['Normal'].font.name='Arial'
-    styles['Normal'].font.size=Pt(10)
-
-    p=doc.add_paragraph()
-    p.alignment=WD_ALIGN_PARAGRAPH.CENTER
-    r=p.add_run("PHARM MEBEL\nMEBEL ISHLAB CHIQARISH (BUYURTMA) SHARTNOMASI")
-    r.bold=True; r.font.size=Pt(14)
-    p2=doc.add_paragraph()
-    p2.alignment=WD_ALIGN_PARAGRAPH.CENTER
-    p2.add_run(f"Shartnoma № {order['kod']}  |  Sana: {str(order['created_at'])[:10]}").bold=True
-
-    doc.add_heading("1. TOMONLAR VA BUYURTMA", level=1)
-    _add_docx_field(doc,"Buyurtmachi",order['mijoz'])
-    _add_docx_field(doc,"Pasport/ID",order['pasport_id'])
-    _add_docx_field(doc,"Telefon",order['telefon'])
-    _add_docx_field(doc,"Manzil",order['manzil'])
-
-    doc.add_heading("2. BUYURTMA TARKIBI", level=1)
-    table=doc.add_table(rows=2,cols=7)
-    table.alignment=WD_TABLE_ALIGNMENT.CENTER
-    table.style='Table Grid'
-    headers=["Kod","Mahsulot","O‘lcham","Soni","Material","Rang","Jami narx"]
-    for i,h in enumerate(headers):
-        cell=table.rows[0].cells[i]
-        cell.text=h
-        cell.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
-    vals=[order['kod'],order['mahsulot'],order['olcham'],order['soni'],
-          order['material'],order['rang'],_fmt_money(order['umumiy_narx'])+" so‘m"]
-    for i,v in enumerate(vals):
-        table.rows[1].cells[i].text=str(v or "")
-
-    doc.add_heading("3. TO‘LOV TARTIBI", level=1)
-    _add_docx_field(doc,"Umumiy summa",_fmt_money(order['umumiy_narx'])+" so‘m")
-    _add_docx_field(doc,"Avans",_fmt_money(order['oldindan_tolov'])+" so‘m")
-    _add_docx_field(doc,"Oraliq to‘lov",_fmt_money(order['oraliq_tolov'])+" so‘m")
-    qoldiq=float(order['umumiy_narx'] or 0)-float(order['oldindan_tolov'] or 0)-float(order['oraliq_tolov'] or 0)
-    _add_docx_field(doc,"Qoldiq",_fmt_money(max(0,qoldiq))+" so‘m")
-    _add_docx_field(doc,"To‘lov usuli",order['tolov_usuli'])
-
-    doc.add_heading("4. MUDDAT, YETKAZISH VA MONTAJ", level=1)
-    _add_docx_field(doc,"Boshlanish sanasi",order['boshlanish_sana'])
-    _add_docx_field(doc,"Rejalashtirilgan tugash sanasi",order['tugash_sana'] or order['taxminiy_sana'])
-    _add_docx_field(doc,"Yetkazish",order['yetkazish'])
-    _add_docx_field(doc,"Montaj",order['montaj'])
-    _add_docx_field(doc,"Yetkazish manzili",order['manzil'])
-    _add_docx_field(doc,"Mo‘ljal",order['moljal'])
-    _add_docx_field(doc,"Qavat",order['qavat'])
-    _add_docx_field(doc,"Lift",order['lift'])
-    _add_docx_field(doc,"Katta mashina kirishi",order['katta_mashina'])
-
-    doc.add_heading("5. SIFAT, TASDIQLASH VA KAFOLAT", level=1)
-    paragraphs=[
-        "Mebel tasdiqlangan chizma, o‘lcham, material va rang asosida ishlab chiqariladi.",
-        "Buyurtmachi chizma yoki materialni tasdiqlagandan keyingi o‘zgarishlar qo‘shimcha narx va muddat bilan bajariladi.",
-        f"Kafolat muddati: {order['kafolat_muddati'] or '12 oy'}. "
-        f"Kafolat sharti: {order['kafolat_sharti'] or 'Ishlab chiqarish va montaj nuqsonlariga amal qiladi.'}",
-        "Noto‘g‘ri foydalanish, namlik, mexanik shikast va uchinchi shaxs ta’miri kafolatga kirmaydi.",
-        "Buyurtmachi sababli tasdiq, to‘lov yoki obyektga kirish kechiksa, ish muddati tegishlicha uzayadi."
+def _register_pdf_fonts() -> tuple[str, str]:
+    """Windows/Linuxda topilgan Unicode shriftni ishlatadi; faylni paketga qo'shmaydi."""
+    candidates = [
+        (r"C:\\Windows\\Fonts\\arial.ttf", r"C:\\Windows\\Fonts\\arialbd.ttf"),
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"),
     ]
-    for s in paragraphs:
-        doc.add_paragraph(s,style=None)
-
-    doc.add_heading("6. QABUL QILISH VA YAKUNIY SHARTLAR", level=1)
-    for s in [
-        "Mebel topshirilganda qabul-topshirish dalolatnomasi imzolanadi.",
-        "Yakuniy to‘lov to‘liq amalga oshirilmaguncha Pudratchi mahsulotni topshirmaslikka haqli.",
-        "Buyurtmachi buyurtmani bekor qilsa, bajarilgan ishlar, sotib olingan materiallar va tasdiqlangan xarajatlar hisobdan ushlab qolinadi.",
-        "Tomonlarning elektron xabar, SMS yoki dasturdagi tasdig‘i yozma kelishuv sifatida qabul qilinadi."
-    ]:
-        doc.add_paragraph(s)
-
-    if order['izoh']:
-        doc.add_heading("Qo‘shimcha izoh",level=2)
-        doc.add_paragraph(order['izoh'])
-
-    doc.add_paragraph("\n")
-    sig=doc.add_table(rows=3,cols=2)
-    sig.style='Table Grid'
-    sig.cell(0,0).text="PUDRATCHI: Pharm Mebel"
-    sig.cell(0,1).text=f"BUYURTMACHI: {order['mijoz']}"
-    sig.cell(1,0).text="Imzo: __________________"
-    sig.cell(1,1).text="Imzo: __________________"
-    sig.cell(2,0).text="Sana: __________________"
-    sig.cell(2,1).text="Sana: __________________"
-    doc.save(docx_path)
-
-    # PDF
-    out=canvas.Canvas(pdf_path,pagesize=A4)
-    w,h=A4
-    y=h-45
-    def draw_wrapped(txt,bold=False,size=10,indent=45,space=15):
-        nonlocal y
-        out.setFont('Helvetica-Bold' if bold else 'Helvetica',size)
-        ascii_txt=(str(txt).replace("‘","'").replace("’","'").replace("–","-")
-                   .replace("—","-").replace("o‘","o'").replace("g‘","g'"))
-        lines=simpleSplit(ascii_txt,'Helvetica-Bold' if bold else 'Helvetica',size,w-indent-45)
-        for line in lines:
-            if y<55:
-                out.showPage(); y=h-45
-            out.drawString(indent,y,line); y-=space
-
-    draw_wrapped("PHARM MEBEL",True,16,45,20)
-    draw_wrapped("MEBEL ISHLAB CHIQARISH (BUYURTMA) SHARTNOMASI",True,13,45,20)
-    draw_wrapped(f"Shartnoma № {order['kod']} | Sana: {str(order['created_at'])[:10]}",True,10)
-    y-=5
-    pdf_items=[
-        ("Buyurtmachi",order['mijoz']),("Pasport/ID",order['pasport_id']),
-        ("Telefon",order['telefon']),("Manzil",order['manzil']),
-        ("Mahsulot",order['mahsulot']),("O'lcham",order['olcham']),
-        ("Soni",order['soni']),("Material",order['material']),("Rang",order['rang']),
-        ("Umumiy summa",_fmt_money(order['umumiy_narx'])+" so'm"),
-        ("Avans",_fmt_money(order['oldindan_tolov'])+" so'm"),
-        ("Oraliq to'lov",_fmt_money(order['oraliq_tolov'])+" so'm"),
-        ("Qoldiq",_fmt_money(max(0,qoldiq))+" so'm"),
-        ("To'lov usuli",order['tolov_usuli']),
-        ("Boshlanish",order['boshlanish_sana']),("Tugash",order['tugash_sana'] or order['taxminiy_sana']),
-        ("Yetkazish",order['yetkazish']),("Montaj",order['montaj']),
-        ("Mo'ljal",order['moljal']),("Qavat",order['qavat']),("Lift",order['lift']),
-        ("Katta mashina",order['katta_mashina']),("Kafolat",order['kafolat_muddati'])
-    ]
-    for label,val in pdf_items:
-        draw_wrapped(f"{label}: {val or '-'}",False,10)
-    y-=7
-    for s in paragraphs:
-        draw_wrapped("- "+s,False,9,50,13)
-    if order['izoh']:
-        draw_wrapped("Izoh: "+order['izoh'],False,9)
-    y-=20
-    draw_wrapped("Pudratchi imzosi: ____________________",False,10)
-    draw_wrapped("Buyurtmachi imzosi: ____________________",False,10)
-    out.save()
-
-    c.execute("""INSERT INTO shartnoma_versiyalari
-                 (buyurtma_id,versiya,docx_fayl,pdf_fayl)
-                 VALUES(?,?,?,?)""",(oid,version,docx_path,pdf_path))
-    c.commit(); c.close()
-    return {"version":version,"docx":docx_path,"pdf":pdf_path}
-
-
-def latest_order_contract(oid):
-    c=get_db()
-    row=c.execute("""SELECT * FROM shartnoma_versiyalari
-                     WHERE buyurtma_id=? ORDER BY versiya DESC,id DESC LIMIT 1""",(oid,)).fetchone()
-    c.close()
-    return row
-
-
-def jdata():
-    d = request.get_json(silent=True)
-    return d if isinstance(d, dict) else {}
-
-
-def calc_hours(start_text, end_text):
-    s = datetime.strptime(start_text, "%H:%M")
-    e = datetime.strptime(end_text, "%H:%M")
-    sec = (e - s).total_seconds()
-    if sec < 0:
-        sec += 86400
-    return round(sec / 3600, 2)
-
-
-def log_action(amal, tafsilot=''):
-    try:
-        c=get_db(); c.execute("INSERT INTO audit_log(sana_vaqt,amal,tafsilot) VALUES(?,?,?)",(_tashkent_now().strftime("%Y-%m-%d %H:%M:%S"),amal,tafsilot)); c.commit(); c.close()
-    except Exception:
-        pass
-
-
-# ---------- CSRF HIMOYASI ----------
-def get_csrf_token():
-    if 'csrf_token' not in session:
-        session['csrf_token'] = secrets.token_hex(16)
-    return session['csrf_token']
-
-app.jinja_env.globals['csrf_token'] = get_csrf_token
-
-
-def _csrf_valid():
-    token = session.get('csrf_token')
-    sent = request.form.get('csrf_token', '')
-    return bool(token) and secrets.compare_digest(token, sent)
-
-
-# ---------- LOGIN URINISHLARINI CHEKLASH (BRUTE-FORCE HIMOYASI) ----------
-_login_attempts = {}
-LOGIN_MAX_ATTEMPTS = 5
-LOGIN_LOCKOUT_SECONDS = 900
-
-def _login_key(username):
-    return f"{request.remote_addr}:{username}"
-
-def _is_login_locked(username):
-    now = datetime.now().timestamp()
-    rec = _login_attempts.get(_login_key(username))
-    if rec and rec[1] and now < rec[1]:
-        return True, int(rec[1]-now)
-    return False, 0
-
-def _register_failed_login(username):
-    now = datetime.now().timestamp()
-    key = _login_key(username)
-    count, locked_until = _login_attempts.get(key, (0, 0))
-    count += 1
-    locked_until = now + LOGIN_LOCKOUT_SECONDS if count >= LOGIN_MAX_ATTEMPTS else 0
-    _login_attempts[key] = (count, locked_until)
-
-def _clear_login_attempts(username):
-    _login_attempts.pop(_login_key(username), None)
-
-
-# ---------- PAROL MUSTAHKAMLIGI ----------
-def _weak_password(pw):
-    """True qaytaradi agar parol zaif bo'lsa: kamida 8 belgi, kamida bitta harf va bitta raqam kerak."""
-    if not pw or len(pw) < 8:
-        return True
-    has_letter = any(ch.isalpha() for ch in pw)
-    has_digit = any(ch.isdigit() for ch in pw)
-    return not (has_letter and has_digit)
-
-
-# ---------- AVTOMATIK KUNLIK ZAXIRA ----------
-def _auto_backup_if_needed():
-    try:
-        backup_dir = os.path.join(_APP_DIR, 'backups')
-        os.makedirs(backup_dir, exist_ok=True)
-        today = _tashkent_today()
-        marker = os.path.join(backup_dir, f".last_backup_{today}")
-        if os.path.exists(marker):
-            return
-        if not os.path.exists(DB_NAME):
-            return
-        import shutil
-        dest = os.path.join(backup_dir, f"pharm_mebel_backup_{today}.db")
-        shutil.copyfile(DB_NAME, dest)
-        with open(marker, 'w') as f:
-            f.write('1')
-        # Oxirgi 30 kunlik zaxiradan ortig'ini o'chirib, joy tejash
-        old_backups = sorted(
-            [f for f in os.listdir(backup_dir) if f.startswith('pharm_mebel_backup_') and f.endswith('.db')]
-        )
-        for old in old_backups[:-30]:
+    for regular, bold in candidates:
+        if os.path.exists(regular) and os.path.exists(bold):
             try:
-                os.remove(os.path.join(backup_dir, old))
+                pdfmetrics.registerFont(TTFont("M360Unicode", regular))
+                pdfmetrics.registerFont(TTFont("M360UnicodeBold", bold))
+                return "M360Unicode", "M360UnicodeBold"
             except Exception:
-                pass
-    except Exception:
-        pass
+                continue
+    return "Helvetica", "Helvetica-Bold"
+
+
+PDF_FONT, PDF_FONT_BOLD = _register_pdf_fonts()
+
+
+def pdf_text(value: Any) -> str:
+    text = str(value)
+    if PDF_FONT == "Helvetica":
+        replacements = {"‘": "'", "’": "'", "ʻ": "'", "ʼ": "'", "×": "x", "–": "-", "—": "-"}
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        text = text.encode("latin-1", "replace").decode("latin-1")
+    return text
+
+
+BASE_CSS = r"""
+:root{--nav:#0f1b33;--blue:#2563eb;--line:#dbe2ea;--bg:#f4f7fb;--ok:#059669;--warn:#d97706;--bad:#dc2626;--text:#172033}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);font-family:Arial,Helvetica,sans-serif;color:var(--text)}
+header{background:linear-gradient(135deg,#0f1b33,#1d4ed8);color:#fff;padding:18px 16px}.top{max-width:1450px;margin:auto;display:flex;align-items:center;justify-content:space-between;gap:12px}.brand{font-size:25px;font-weight:800}.sub{font-size:12px;opacity:.85;margin-top:4px}
+.wrap{max-width:1450px;margin:auto;padding:15px}.grid{display:grid;grid-template-columns:410px 1fr;gap:14px}.panel{background:#fff;border-radius:15px;padding:14px;box-shadow:0 8px 26px #17203312;margin-bottom:14px}h2,h3{margin:0 0 11px}label{font-size:12px;font-weight:700;display:block;margin-top:8px}input,select,textarea{width:100%;padding:9px;border:1px solid #cbd5e1;border-radius:8px;margin-top:4px;background:#fff}input[type=checkbox]{width:auto;margin:0 5px 0 0}.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}.row4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.checks{display:flex;flex-wrap:wrap;gap:8px;margin-top:7px}.check{background:#f1f5f9;border-radius:7px;padding:7px;font-size:12px}
+button,.btn{display:inline-block;border:0;border-radius:9px;padding:10px 13px;background:var(--blue);color:#fff;font-weight:700;text-decoration:none;cursor:pointer}.btn2{background:#334155}.ok{background:var(--ok)}.warn{background:var(--warn)}.danger{background:var(--bad)}.light{background:#e2e8f0;color:#1e293b}.actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}.actions form{margin:0}
+table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px solid #e5e7eb;padding:8px;text-align:left;vertical-align:top}th{background:#f8fafc;position:sticky;top:0}.tablewrap{overflow:auto;max-height:500px}.muted{color:#64748b;font-size:12px}.badge{display:inline-block;background:#e0e7ff;color:#3730a3;border-radius:20px;padding:3px 8px;font-size:11px;font-weight:700}.flash{padding:10px 12px;border-radius:9px;background:#dcfce7;color:#166534;margin-bottom:10px}.flash.bad{background:#fee2e2;color:#991b1b}
+.sheet-grid{display:grid;grid-template-columns:repeat(2,minmax(350px,1fr));gap:12px}.sheet-card{background:#fff;border-radius:14px;padding:10px;box-shadow:0 5px 18px #17203310}.sheet-head{display:flex;justify-content:space-between;align-items:start;gap:8px;margin-bottom:7px}.sheet-title{font-weight:800}.sheet-svg{width:100%;height:auto;background:#fff;border:1px solid #94a3b8;touch-action:pan-x pan-y}.legend{font-size:11px;color:#475569;margin-top:6px}.edge-list{font-weight:700;color:#b91c1c}.small{font-size:11px}.empty{padding:25px;text-align:center;color:#64748b;border:2px dashed #cbd5e1;border-radius:12px}.opt-box{margin-top:9px;padding:10px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:10px}.offcut-stat{color:#9a3412;font-weight:800}.variant-note{font-size:11px;color:#047857;margin-top:5px}
+.worker-header{display:flex;justify-content:space-between;gap:10px;align-items:center}.top-actions{display:flex;align-items:center;gap:8px}.top-actions form{margin:0}.auth-wrap{max-width:460px;margin:35px auto}.auth-note{padding:10px 12px;border-radius:9px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e3a8a;font-size:12px;margin-bottom:12px}.statusline{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.stat{padding:8px 11px;border-radius:10px;background:#eef2ff;font-size:12px;font-weight:700}.qr{width:150px;height:150px;background:#fff;padding:6px;border-radius:10px}.part-cards{display:none}.part-card{border:1px solid #dbe2ea;border-radius:10px;padding:9px;margin:7px 0;background:#fff}
+.edge-help{margin:8px 0 2px;padding:9px 10px;background:#fff7ed;border:1px solid #fed7aa;border-radius:9px;color:#9a3412;font-size:12px}
+.edge-pickers{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:7px}.edge-picker{border:1px solid #dbe2ea;border-radius:10px;padding:8px;background:#f8fafc}.edge-picker-title{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:5px}.edge-dim{font-weight:800;font-size:15px}.edge-side-name{font-size:10px;color:#64748b}.edge-lines{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+button.edge-toggle{display:block;width:100%;height:25px;padding:0 6px;border:1px solid #cbd5e1;border-radius:7px;background:#fff;color:#475569;box-shadow:none}.edge-toggle .edge-stroke{display:block;height:3px;border-radius:5px;background:#94a3b8;transition:.15s}.edge-toggle.active{border-color:#ef4444;background:#fff1f2}.edge-toggle.active .edge-stroke{height:6px;background:#dc2626;box-shadow:0 0 0 1px #b91c1c}.edge-toggle:hover{border-color:#64748b}.edge-toggle.active:hover{border-color:#b91c1c}.edge-no{font-size:9px;position:absolute;opacity:0}.dim-cell{min-width:112px}.dim-value{font-weight:800;font-size:13px;text-align:center;margin-bottom:4px}.table-edge-lines{display:grid;grid-template-columns:1fr 1fr;gap:4px}.table-edge-lines button.edge-toggle{height:20px}.table-edge-lines .edge-toggle .edge-stroke{height:2px}.table-edge-lines .edge-toggle.active .edge-stroke{height:5px}.part-card .edge-pickers{margin:8px 0}.part-card .edge-picker{padding:6px}.part-card .edge-dim{font-size:13px}
+.grain-box{margin-top:10px;padding:10px;border:1px solid #bfdbfe;background:#eff6ff;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:10px}.grain-title{font-weight:800}.grain-note{font-size:11px;color:#475569;margin-top:3px}.grain-toggle{display:flex;align-items:center;gap:7px;padding:8px 10px;border-radius:9px;background:#fff;border:1px solid #cbd5e1;cursor:pointer;white-space:nowrap}.grain-toggle input{margin:0;width:auto}.grain-badge{display:inline-block;padding:4px 7px;border-radius:16px;background:#dcfce7;color:#166534;font-size:11px;font-weight:800}.grain-badge.locked{background:#fee2e2;color:#991b1b}.rotate-action{padding:6px 8px;font-size:11px;background:#0f766e}.rotate-action.locked{background:#b91c1c}.meter-box{margin-top:10px;padding:10px 12px;border-radius:10px;background:#f0fdf4;border:1px solid #bbf7d0;display:flex;align-items:center;justify-content:space-between;gap:10px}.meter-box strong{font-size:20px;color:#166534}.meter-box small{color:#64748b}.meter-total{margin-top:10px;padding:10px 12px;border-radius:10px;background:#fff7ed;border:1px solid #fed7aa;font-weight:800;color:#9a3412}.meter-cell{font-weight:800;color:#166534;white-space:nowrap}.grain-cell{min-width:135px}
+@media(max-width:1000px){.grid{grid-template-columns:1fr}.sheet-grid{grid-template-columns:1fr}}
+@media(max-width:600px){header{padding:13px 10px}.wrap{padding:8px}.brand{font-size:21px}.panel{padding:10px;border-radius:11px}.row,.row4{grid-template-columns:1fr 1fr}.tablewrap.desktop{display:none}.part-cards{display:block}.sheet-card{padding:7px}.sheet-head{display:block}.actions .btn,.actions button{flex:1;text-align:center}.qr{width:125px;height:125px}}
+
+/* Mebel360 Pro V8 zamonaviy ko'rinish */
+body{background:radial-gradient(circle at top left,#dbeafe 0,transparent 28%),radial-gradient(circle at top right,#dcfce7 0,transparent 26%),#f5f7fb;min-height:100vh}
+header{position:sticky;top:0;z-index:30;padding:13px 16px;background:rgba(10,20,38,.94);backdrop-filter:blur(14px);box-shadow:0 10px 30px #0f172a22}
+.brand{letter-spacing:-.5px}.brand-mark{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;margin-right:9px;border-radius:11px;background:linear-gradient(135deg,#60a5fa,#22c55e);box-shadow:0 8px 20px #22c55e33}.module-pill{display:inline-block;margin-left:8px;padding:4px 8px;border:1px solid #ffffff30;border-radius:999px;font-size:10px;vertical-align:middle;color:#dbeafe}
+.wrap{padding-top:20px}.panel{border:1px solid #e2e8f0;box-shadow:0 14px 38px #0f172a0d;transition:transform .18s ease,box-shadow .18s ease}.panel:hover{box-shadow:0 18px 45px #0f172a14}.panel h2,.panel h3{letter-spacing:-.3px}
+.hero{position:relative;overflow:hidden;background:linear-gradient(135deg,#0f172a 0%,#1e3a8a 55%,#0f766e 100%);color:#fff;border:0;padding:22px}.hero:after{content:"";position:absolute;width:260px;height:260px;border-radius:50%;right:-85px;top:-125px;background:#ffffff12}.hero-grid{position:relative;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:18px}.hero h1{margin:0 0 6px;font-size:27px}.hero p{margin:0;color:#dbeafe;max-width:760px}.hero-actions{display:flex;gap:8px;flex-wrap:wrap}.hero .btn{background:#fff;color:#0f172a}.hero .btn2{background:#ffffff18;border:1px solid #ffffff35}
+.step-title{display:flex;align-items:center;gap:9px}.step-no{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:9px;background:linear-gradient(135deg,#2563eb,#0f766e);color:#fff;font-size:13px}.section-note{margin:-4px 0 12px;color:#64748b;font-size:12px}
+.import-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}.file-box{border:1px dashed #93c5fd;background:#eff6ff;border-radius:12px;padding:11px}.file-box.green{border-color:#86efac;background:#f0fdf4}.file-box h4{margin:0 0 6px;font-size:13px}.file-box input{background:#fff}
+input,select,textarea{border:1px solid #d6deea;background:#fbfdff;transition:border .16s,box-shadow .16s,background .16s}input:focus,select:focus,textarea:focus{outline:none;border-color:#3b82f6;background:#fff;box-shadow:0 0 0 4px #3b82f61a}
+button,.btn{box-shadow:0 5px 14px #2563eb22;transition:transform .13s ease,filter .13s ease,box-shadow .13s ease}button:hover,.btn:hover{transform:translateY(-1px);filter:brightness(1.03);box-shadow:0 8px 20px #0f172a1c}button:active,.btn:active{transform:translateY(0)}
+.stat{border:1px solid #c7d2fe;background:linear-gradient(180deg,#f8faff,#eef2ff)}.badge{border:1px solid #c7d2fe}.badge.ready{background:#dcfce7;color:#166534;border-color:#86efac}.badge.progress{background:#fef3c7;color:#92400e;border-color:#fcd34d}.badge.revoked{background:#fee2e2;color:#991b1b;border-color:#fecaca}
+.sheet-card{border:1px solid #dbe3ef;box-shadow:0 12px 28px #0f172a0d}.sheet-svg{border-radius:8px}.security-note{padding:10px 12px;border-radius:11px;background:#f0fdf4;border:1px solid #bbf7d0;color:#166534;font-size:12px;margin-top:10px}.warning-note{padding:10px 12px;border-radius:11px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;font-size:12px;margin-top:10px}
+.attachment{display:flex;align-items:center;justify-content:space-between;gap:10px;border:1px solid #dbe2ea;border-radius:10px;padding:9px 10px;background:#f8fafc;margin-top:8px}.attachment-name{font-weight:700}.attachment-meta{font-size:11px;color:#64748b}
+.empty{background:#f8fafc}.tablewrap{border:1px solid #eef2f7;border-radius:10px}th{background:#f8fafc;color:#334155;text-transform:none}
+@media(max-width:760px){.hero-grid{display:block}.hero-actions{margin-top:14px}.import-grid{grid-template-columns:1fr}.hero h1{font-size:22px}.grid{gap:8px}.top-actions .small{display:none}}
+
+/* Mebel360 Pro V9 — rollar va mijoz kuzatuvi */
+.navbar{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.navlink{display:inline-flex;align-items:center;gap:6px;padding:8px 10px;border-radius:10px;color:#e2e8f0;text-decoration:none;font-size:12px;font-weight:800;border:1px solid transparent}.navlink:hover{background:#ffffff12;border-color:#ffffff1f}.navlink.active{background:#ffffff18;color:#fff}.role-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 9px;border-radius:999px;background:#0ea5e922;border:1px solid #38bdf84d;color:#bae6fd;font-size:11px;font-weight:800}
+.dashboard-hero{background:linear-gradient(135deg,#0f172a,#1d4ed8 52%,#0f766e);color:#fff;border:0;padding:26px}.dashboard-hero h1{font-size:30px;margin:0 0 7px}.dashboard-hero p{margin:0;color:#dbeafe;max-width:850px}.role-grid{display:grid;grid-template-columns:repeat(4,minmax(210px,1fr));gap:14px;margin:14px 0}.role-card{position:relative;overflow:hidden;display:block;background:#fff;border:1px solid #e2e8f0;border-radius:18px;padding:18px;text-decoration:none;color:#172033;box-shadow:0 14px 35px #0f172a0d;transition:.18s}.role-card:hover{transform:translateY(-3px);box-shadow:0 18px 42px #0f172a18}.role-card:after{content:"";position:absolute;width:105px;height:105px;border-radius:50%;right:-42px;top:-44px;background:linear-gradient(135deg,#60a5fa33,#22c55e33)}.role-icon{display:flex;align-items:center;justify-content:center;width:48px;height:48px;border-radius:14px;background:linear-gradient(135deg,#dbeafe,#dcfce7);font-size:24px;margin-bottom:12px}.role-card h3{margin:0 0 5px;font-size:18px}.role-card p{margin:0;color:#64748b;font-size:12px;line-height:1.45}.role-arrow{margin-top:13px;font-weight:800;color:#2563eb;font-size:12px}
+.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.kpi{padding:15px;border-radius:15px;background:linear-gradient(180deg,#fff,#f8fafc);border:1px solid #e2e8f0}.kpi b{display:block;font-size:25px;letter-spacing:-1px}.kpi span{font-size:11px;color:#64748b;font-weight:700}
+.progress-track{height:10px;background:#e2e8f0;border-radius:999px;overflow:hidden;min-width:100px}.progress-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,#2563eb,#10b981);transition:width .3s}.progress-label{font-size:11px;font-weight:800;color:#334155;margin-top:4px}.order-card{border:1px solid #e2e8f0;border-radius:15px;padding:13px;background:#fff;margin-bottom:10px}.order-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.order-code{font-size:17px;font-weight:900}.split-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}.copy-box{display:flex;gap:6px;align-items:center}.copy-box input{margin:0;font-size:11px}.copy-box button{white-space:nowrap}
+.customer-shell{max-width:760px;margin:12px auto}.customer-top{position:relative;overflow:hidden;background:linear-gradient(135deg,#0f172a,#1e40af 55%,#0f766e);color:#fff;border-radius:22px;padding:24px;box-shadow:0 20px 50px #0f172a22}.customer-top:after{content:"360°";position:absolute;right:-12px;top:-22px;font-size:110px;font-weight:900;color:#ffffff0b}.customer-code{font-size:13px;color:#bfdbfe;font-weight:800}.customer-title{font-size:28px;font-weight:900;margin:4px 0}.customer-stage{font-size:14px;color:#dbeafe}.customer-progress{margin-top:18px}.customer-progress .progress-track{height:14px;background:#ffffff2b}.customer-progress .progress-fill{background:linear-gradient(90deg,#38bdf8,#4ade80)}.customer-progress-row{display:flex;justify-content:space-between;margin-bottom:6px;font-weight:800}.timeline{position:relative;margin:6px 0}.timeline-item{position:relative;padding:4px 0 16px 34px}.timeline-item:before{content:"";position:absolute;left:10px;top:7px;width:12px;height:12px;border-radius:50%;background:#10b981;box-shadow:0 0 0 5px #d1fae5}.timeline-item:after{content:"";position:absolute;left:15px;top:23px;bottom:-2px;width:2px;background:#dbe2ea}.timeline-item:last-child:after{display:none}.timeline-title{font-weight:900}.timeline-time{font-size:11px;color:#64748b;margin-top:2px}.timeline-message{font-size:12px;color:#475569;margin-top:3px;line-height:1.45}.stage-list{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:12px}.stage-step{padding:9px 6px;text-align:center;border-radius:11px;background:#f1f5f9;color:#64748b;font-size:10px;font-weight:800;border:1px solid #e2e8f0}.stage-step.done{background:#ecfdf5;color:#047857;border-color:#a7f3d0}.stage-step.current{background:#eff6ff;color:#1d4ed8;border-color:#bfdbfe}.auto-note{font-size:11px;color:#64748b;text-align:center;margin-top:10px}
+.notice-preview{padding:14px;border-radius:14px;background:linear-gradient(135deg,#eff6ff,#ecfdf5);border:1px solid #bfdbfe}.notice-preview b{color:#1e40af}.delivery-buttons{display:flex;gap:6px;flex-wrap:wrap}.delivery-buttons form{margin:0}.delivery-status{font-weight:900}.delivery-status.road{color:#d97706}.delivery-status.done{color:#059669}.mini-form{padding:12px;border-radius:13px;background:#f8fafc;border:1px solid #e2e8f0}.user-grid{display:grid;grid-template-columns:360px 1fr;gap:14px}
+@media(max-width:1050px){.role-grid{grid-template-columns:repeat(2,1fr)}.split-grid,.user-grid{grid-template-columns:1fr}.kpi-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:600px){.navbar{display:none}.role-grid{grid-template-columns:1fr}.kpi-grid{grid-template-columns:1fr 1fr}.dashboard-hero{padding:19px}.dashboard-hero h1{font-size:23px}.customer-title{font-size:23px}.stage-list{grid-template-columns:1fr}.stage-step{text-align:left}.copy-box{display:block}.copy-box button{margin-top:6px;width:100%}}
+
+@media print{
+@page{size:A4 portrait;margin:8mm}
+html,body{background:#fff}
+header,.no-print{display:none!important}
+.wrap{max-width:none;padding:0}
+.panel,.sheet-card{box-shadow:none}
+.sheet-grid{display:grid;grid-template-columns:1fr;gap:4mm}
+.sheet-card{border:1px solid #94a3b8;border-radius:0;padding:3mm;height:132mm;overflow:hidden;break-inside:avoid;page-break-inside:avoid;margin:0}
+.sheet-card:nth-child(2n){page-break-after:always}
+.sheet-svg{width:100%;max-height:101mm}
+.sheet-head{margin-bottom:2mm}
+.legend{font-size:8px;line-height:1.15;margin-top:1mm}
+}
+"""
+
+
+@dataclass
+class Part:
+    uid: str
+    name: str
+    length: int
+    width: int
+    qty: int = 1
+    rotate: bool = True
+    edge_left: bool = False
+    edge_right: bool = False
+    edge_top: bool = False
+    edge_bottom: bool = False
+
+
+@dataclass
+class Placement:
+    uid: str
+    name: str
+    x: int
+    y: int
+    w: int
+    h: int
+    original_length: int
+    original_width: int
+    rotated: bool
+    edge_left: bool
+    edge_right: bool
+    edge_top: bool
+    edge_bottom: bool
+    rotate_allowed: bool = True
+
+
+@dataclass
+class FreeRect:
+    x: int
+    y: int
+    w: int
+    h: int
+
+
+@dataclass
+class SheetPlan:
+    number: int
+    width: int
+    height: int
+    placements: list[Placement]
+    leftovers: list[FreeRect] = field(default_factory=list)
+    variant: str = ""
+
+
+def get_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def init_db() -> None:
+    conn = get_db()
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS kroy_jobs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_code TEXT NOT NULL,
+            customer TEXT DEFAULT '',
+            material TEXT NOT NULL,
+            sheet_length INTEGER NOT NULL,
+            sheet_width INTEGER NOT NULL,
+            kerf INTEGER DEFAULT 4,
+            trim INTEGER DEFAULT 10,
+            worker_name TEXT DEFAULT '',
+            token TEXT UNIQUE NOT NULL,
+            status TEXT DEFAULT 'Yangi',
+            created_at TEXT NOT NULL,
+            sent_at TEXT DEFAULT '',
+            finished_at TEXT DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS kroy_parts(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            uid TEXT NOT NULL,
+            name TEXT NOT NULL,
+            length INTEGER NOT NULL,
+            width INTEGER NOT NULL,
+            qty INTEGER DEFAULT 1,
+            rotate INTEGER DEFAULT 1,
+            edge_left INTEGER DEFAULT 0,
+            edge_right INTEGER DEFAULT 0,
+            edge_top INTEGER DEFAULT 0,
+            edge_bottom INTEGER DEFAULT 0,
+            FOREIGN KEY(job_id) REFERENCES kroy_jobs(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS kroy_sheets(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            sheet_no INTEGER NOT NULL,
+            plan_json TEXT NOT NULL,
+            cut_done INTEGER DEFAULT 0,
+            edge_done INTEGER DEFAULT 0,
+            note TEXT DEFAULT '',
+            FOREIGN KEY(job_id) REFERENCES kroy_jobs(id) ON DELETE CASCADE,
+            UNIQUE(job_id,sheet_no)
+        );
+        CREATE TABLE IF NOT EXISTS kroy_import_drafts(
+            token TEXT PRIMARY KEY,
+            source_name TEXT DEFAULT '',
+            parts_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS app_users(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'admin',
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS login_attempts(
+            ip TEXT PRIMARY KEY,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            blocked_until INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS audit_log(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT DEFAULT '',
+            action TEXT NOT NULL,
+            ip TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS kroy_attachments(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'FILE',
+            original_name TEXT NOT NULL,
+            stored_name TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(job_id) REFERENCES kroy_jobs(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS customer_updates(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            event_key TEXT NOT NULL,
+            title TEXT NOT NULL,
+            message TEXT DEFAULT '',
+            stage TEXT DEFAULT '',
+            progress INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(job_id) REFERENCES kroy_jobs(id) ON DELETE CASCADE,
+            UNIQUE(job_id,event_key)
+        );
+        """
+    )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(kroy_jobs)").fetchall()}
+    if "optimization_mode" not in columns:
+        conn.execute("ALTER TABLE kroy_jobs ADD COLUMN optimization_mode TEXT DEFAULT 'large'")
+    if "tested_variants" not in columns:
+        conn.execute("ALTER TABLE kroy_jobs ADD COLUMN tested_variants INTEGER DEFAULT 0")
+    if "best_variant" not in columns:
+        conn.execute("ALTER TABLE kroy_jobs ADD COLUMN best_variant TEXT DEFAULT ''")
+    if "worker_link_active" not in columns:
+        conn.execute("ALTER TABLE kroy_jobs ADD COLUMN worker_link_active INTEGER DEFAULT 1")
+    if "worker_token_created_at" not in columns:
+        conn.execute("ALTER TABLE kroy_jobs ADD COLUMN worker_token_created_at TEXT DEFAULT ''")
+        conn.execute("UPDATE kroy_jobs SET worker_token_created_at=COALESCE(NULLIF(sent_at,''),created_at)")
+    if "customer_token" not in columns:
+        conn.execute("ALTER TABLE kroy_jobs ADD COLUMN customer_token TEXT DEFAULT ''")
+    if "customer_link_active" not in columns:
+        conn.execute("ALTER TABLE kroy_jobs ADD COLUMN customer_link_active INTEGER DEFAULT 1")
+    if "delivery_status" not in columns:
+        conn.execute("ALTER TABLE kroy_jobs ADD COLUMN delivery_status TEXT DEFAULT 'Kutilmoqda'")
+    if "delivery_note" not in columns:
+        conn.execute("ALTER TABLE kroy_jobs ADD COLUMN delivery_note TEXT DEFAULT ''")
+    if "delivered_at" not in columns:
+        conn.execute("ALTER TABLE kroy_jobs ADD COLUMN delivered_at TEXT DEFAULT ''")
+    for row in conn.execute("SELECT id FROM kroy_jobs WHERE COALESCE(customer_token,'')='' ").fetchall():
+        conn.execute("UPDATE kroy_jobs SET customer_token=? WHERE id=?", (secrets.token_urlsafe(24), row["id"]))
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_kroy_jobs_customer_token ON kroy_jobs(customer_token)")
+    conn.commit()
+    conn.close()
+
+
+def _truthy_border(value: str) -> bool:
+    value = (value or "").strip().upper()
+    return value not in {"", "0", "F", "FALSE", "N", "NO"}
+
+
+def parse_dbf(data: bytes) -> list[Part]:
+    """2D-PLACE xBase/DBF faylidan detallarni o'qiydi.
+
+    Kutilyotgan ustunlar: NAME, LENGTH, WIDTH, MANY, ROTATE,
+    LBORDER, RBORDER, TBORDER, BBORDER.
+    """
+    if len(data) < 65:
+        raise ValueError("DBF fayl juda kichik yoki buzilgan")
+    records = struct.unpack("<I", data[4:8])[0]
+    header_len = struct.unpack("<H", data[8:10])[0]
+    record_len = struct.unpack("<H", data[10:12])[0]
+    if header_len <= 32 or record_len <= 1 or header_len > len(data):
+        raise ValueError("DBF sarlavhasi noto'g'ri")
+
+    fields: list[tuple[str, str, int, int]] = []
+    offset = 32
+    pos = 1
+    while offset + 32 <= header_len and data[offset] != 0x0D:
+        desc = data[offset : offset + 32]
+        name = desc[:11].split(b"\0", 1)[0].decode("ascii", "ignore").upper()
+        ftype = chr(desc[11])
+        length = desc[16]
+        if not name or length <= 0:
+            raise ValueError("DBF ustun tavsifi buzilgan")
+        fields.append((name, ftype, length, pos))
+        pos += length
+        offset += 32
+
+    available = {f[0] for f in fields}
+    required = {"LENGTH", "WIDTH", "MANY"}
+    if not required.issubset(available):
+        raise ValueError("Bu DBFda LENGTH, WIDTH yoki MANY ustuni topilmadi")
+
+    def text(raw: bytes, ftype: str) -> str:
+        raw = raw.rstrip(b" \x00")
+        if ftype in {"N", "F", "L"}:
+            return raw.decode("ascii", "ignore").strip()
+        for enc in ("cp866", "cp1251", "utf-8", "latin1"):
+            try:
+                return raw.decode(enc).strip()
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("latin1", "replace").strip()
+
+    parts: list[Part] = []
+    for idx in range(min(records, 10000)):
+        start = header_len + idx * record_len
+        rec = data[start : start + record_len]
+        if len(rec) < record_len:
+            break
+        if rec[:1] == b"*":
+            continue
+        row: dict[str, str] = {}
+        for name, ftype, length, field_pos in fields:
+            row[name] = text(rec[field_pos : field_pos + length], ftype)
+        try:
+            length = int(float(row.get("LENGTH", "0") or 0))
+            width = int(float(row.get("WIDTH", "0") or 0))
+            qty = max(1, int(float(row.get("MANY", "1") or 1)))
+        except ValueError:
+            continue
+        if length <= 0 or width <= 0:
+            continue
+        parts.append(
+            Part(
+                uid=secrets.token_hex(4),
+                name=row.get("NAME") or f"Detal {idx + 1}",
+                length=length,
+                width=width,
+                qty=qty,
+                rotate=(row.get("ROTATE", "0").strip() not in {"1", "N", "F"}),
+                edge_left=_truthy_border(row.get("LBORDER", "")),
+                edge_right=_truthy_border(row.get("RBORDER", "")),
+                edge_top=_truthy_border(row.get("TBORDER", "")),
+                edge_bottom=_truthy_border(row.get("BBORDER", "")),
+            )
+        )
+    if not parts:
+        raise ValueError("DBF ichidan yaroqli detallar topilmadi")
+    return parts
+
+
+def rotated_edges(part: Part, rotated: bool) -> tuple[bool, bool, bool, bool]:
+    if not rotated:
+        return part.edge_left, part.edge_right, part.edge_top, part.edge_bottom
+    # 90 daraja soat yo'nalishi bo'yicha: yangi L=eski B, R=eski T, T=eski L, B=eski R
+    return part.edge_bottom, part.edge_top, part.edge_left, part.edge_right
+
+
+def _intersects(a: FreeRect, b: FreeRect) -> bool:
+    return not (b.x >= a.x + a.w or b.x + b.w <= a.x or b.y >= a.y + a.h or b.y + b.h <= a.y)
+
+
+def _contains(a: FreeRect, b: FreeRect) -> bool:
+    return b.x >= a.x and b.y >= a.y and b.x + b.w <= a.x + a.w and b.y + b.h <= a.y + a.h
+
+
+def _merge_free_rects(rects: list[FreeRect]) -> list[FreeRect]:
+    """Yonma-yon qoldiqlarni birlashtirib, katta foydalaniladigan qoldiq saqlaydi."""
+    result = [FreeRect(r.x, r.y, r.w, r.h) for r in rects if r.w > 0 and r.h > 0]
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(result)):
+            if changed:
+                break
+            for j in range(i + 1, len(result)):
+                a, b = result[i], result[j]
+                merged: FreeRect | None = None
+                # gorizontal yonma-yon
+                if a.y == b.y and a.h == b.h and (a.x + a.w == b.x or b.x + b.w == a.x):
+                    merged = FreeRect(min(a.x, b.x), a.y, a.w + b.w, a.h)
+                # vertikal yonma-yon
+                elif a.x == b.x and a.w == b.w and (a.y + a.h == b.y or b.y + b.h == a.y):
+                    merged = FreeRect(a.x, min(a.y, b.y), a.w, a.h + b.h)
+                if merged:
+                    result.pop(j)
+                    result.pop(i)
+                    result.append(merged)
+                    changed = True
+                    break
+    return result
+
+
+def _prune_free_rects(rects: list[FreeRect]) -> list[FreeRect]:
+    cleaned: list[FreeRect] = []
+    for i, rect in enumerate(rects):
+        if rect.w <= 0 or rect.h <= 0:
+            continue
+        if any(i != j and _contains(other, rect) for j, other in enumerate(rects)):
+            continue
+        if not any((r.x, r.y, r.w, r.h) == (rect.x, rect.y, rect.w, rect.h) for r in cleaned):
+            cleaned.append(rect)
+    return _merge_free_rects(cleaned)
+
+
+def _guillotine_split(fr: FreeRect, used_w: int, used_h: int, split_mode: str) -> list[FreeRect]:
+    """Detalni bo'sh to'rtburchakning chap-tepasiga qo'yib, qoldiqni 2 katta bo'lakka ajratadi."""
+    dw = fr.w - used_w
+    dh = fr.h - used_h
+    out: list[FreeRect] = []
+    if split_mode == "vertical":
+        # o'ngdagi qoldiq to'liq balandlikda qoladi
+        if dw > 0:
+            out.append(FreeRect(fr.x + used_w, fr.y, dw, fr.h))
+        if dh > 0:
+            out.append(FreeRect(fr.x, fr.y + used_h, used_w, dh))
+    else:
+        # pastdagi qoldiq to'liq kenglikda qoladi
+        if dh > 0:
+            out.append(FreeRect(fr.x, fr.y + used_h, fr.w, dh))
+        if dw > 0:
+            out.append(FreeRect(fr.x + used_w, fr.y, dw, used_h))
+    return out
+
+
+def _expanded_parts(parts: Iterable[Part]) -> list[tuple[Part, int]]:
+    expanded: list[tuple[Part, int]] = []
+    for part in parts:
+        for copy_no in range(1, part.qty + 1):
+            expanded.append((part, copy_no))
+    return expanded
+
+
+def _ordered_parts(expanded: list[tuple[Part, int]], mode: str, seed: int = 0) -> list[tuple[Part, int]]:
+    data = list(expanded)
+    if mode == "area":
+        key = lambda item: (item[0].length * item[0].width, max(item[0].length, item[0].width), min(item[0].length, item[0].width))
+    elif mode == "max_side":
+        key = lambda item: (max(item[0].length, item[0].width), item[0].length * item[0].width, min(item[0].length, item[0].width))
+    elif mode == "length":
+        key = lambda item: (item[0].length, item[0].width, item[0].length * item[0].width)
+    elif mode == "width":
+        key = lambda item: (item[0].width, item[0].length, item[0].length * item[0].width)
+    elif mode == "perimeter":
+        key = lambda item: (item[0].length + item[0].width, item[0].length * item[0].width)
+    elif mode == "thin_first":
+        key = lambda item: (max(item[0].length, item[0].width) / max(1, min(item[0].length, item[0].width)), item[0].length * item[0].width)
+    elif mode == "square_first":
+        key = lambda item: (-abs(item[0].length - item[0].width), item[0].length * item[0].width)
+    else:
+        key = lambda item: (item[0].length * item[0].width, max(item[0].length, item[0].width))
+    data.sort(key=key, reverse=True)
+    if seed:
+        # Bir xil yoki yaqin o'lchamli detallar tartibini xavfsiz ravishda o'zgartirib ko'radi.
+        rng = random.Random(seed)
+        buckets: dict[int, list[tuple[Part, int]]] = {}
+        for item in data:
+            area = item[0].length * item[0].width
+            bucket = max(1, area // 50000)
+            buckets.setdefault(bucket, []).append(item)
+        data = []
+        for bucket in sorted(buckets, reverse=True):
+            group = buckets[bucket]
+            rng.shuffle(group)
+            data.extend(group)
+    return data
+
+
+def _candidate_score(
+    heuristic: str,
+    sheet_index: int,
+    fr: FreeRect,
+    used_w: int,
+    used_h: int,
+    new_free: list[FreeRect],
+    split_mode: str,
+) -> tuple[Any, ...]:
+    area_fit = fr.w * fr.h - used_w * used_h
+    short_fit = min(fr.w - used_w, fr.h - used_h)
+    long_fit = max(fr.w - used_w, fr.h - used_h)
+    largest = max((r.w * r.h for r in new_free), default=0)
+    fragments = len(new_free)
+    # Kichik y/x = detallar bir burchakka yig'iladi va qoldiq bir joyda qoladi.
+    if heuristic == "large_offcut":
+        return (-largest, fragments, fr.y, fr.x, area_fit, short_fit, sheet_index, split_mode)
+    if heuristic == "compact":
+        return (fr.y, fr.x, fragments, -largest, area_fit, short_fit, sheet_index, split_mode)
+    if heuristic == "long_side":
+        return (long_fit, short_fit, fragments, -largest, fr.y, fr.x, sheet_index, split_mode)
+    return (area_fit, short_fit, fragments, -largest, fr.y, fr.x, sheet_index, split_mode)
+
+
+def _pack_once(
+    ordered: list[tuple[Part, int]],
+    sheet_length: int,
+    sheet_width: int,
+    kerf: int,
+    trim: int,
+    heuristic: str,
+    split_preference: str,
+    variant_name: str,
+) -> list[SheetPlan]:
+    usable_w = sheet_length - 2 * trim
+    usable_h = sheet_width - 2 * trim
+    if usable_w <= 0 or usable_h <= 0:
+        raise ValueError("List o'lchami yoki chet kesimi noto'g'ri")
+
+    sheets: list[dict[str, Any]] = []
+    initial = FreeRect(trim, trim, usable_w + kerf, usable_h + kerf)
+
+    for part, copy_no in ordered:
+        if part.length <= 0 or part.width <= 0:
+            continue
+        orientations = [(part.length, part.width, False)]
+        if part.rotate and part.length != part.width:
+            orientations.append((part.width, part.length, True))
+
+        best: tuple[tuple[Any, ...], int, int, int, bool, str, list[FreeRect]] | None = None
+        for si, sheet in enumerate(sheets):
+            for fi, fr in enumerate(sheet["free"]):
+                for w, h, rotated in orientations:
+                    reserve_w, reserve_h = w + kerf, h + kerf
+                    if reserve_w > fr.w or reserve_h > fr.h:
+                        continue
+                    modes = [split_preference] if split_preference in {"vertical", "horizontal"} else ["vertical", "horizontal"]
+                    for split_mode in modes:
+                        replacement = _guillotine_split(fr, reserve_w, reserve_h, split_mode)
+                        candidate_free = sheet["free"][:fi] + sheet["free"][fi + 1:] + replacement
+                        candidate_free = _prune_free_rects(candidate_free)
+                        score = _candidate_score(heuristic, si, fr, reserve_w, reserve_h, candidate_free, split_mode)
+                        candidate = (score, si, fi, w, h, rotated, split_mode, candidate_free)
+                        if best is None or candidate[0] < best[0]:
+                            best = candidate
+
+        if best is None:
+            fits: list[tuple[tuple[Any, ...], int, int, bool, str, list[FreeRect]]] = []
+            for w, h, rotated in orientations:
+                reserve_w, reserve_h = w + kerf, h + kerf
+                if reserve_w > initial.w or reserve_h > initial.h:
+                    continue
+                modes = [split_preference] if split_preference in {"vertical", "horizontal"} else ["vertical", "horizontal"]
+                for split_mode in modes:
+                    candidate_free = _prune_free_rects(_guillotine_split(initial, reserve_w, reserve_h, split_mode))
+                    score = _candidate_score(heuristic, len(sheets), initial, reserve_w, reserve_h, candidate_free, split_mode)
+                    fits.append((score, w, h, rotated, split_mode, candidate_free))
+            if not fits:
+                raise ValueError(f"'{part.name}' ({part.length}x{part.width}) listga sig'maydi")
+            _, w, h, rotated, split_mode, candidate_free = min(fits, key=lambda x: x[0])
+            sheets.append({"free": candidate_free, "placements": []})
+            si = len(sheets) - 1
+            fr = initial
+        else:
+            _, si, fi, w, h, rotated, split_mode, candidate_free = best
+            fr = sheets[si]["free"][fi]
+            sheets[si]["free"] = candidate_free
+
+        left, right, top, bottom = rotated_edges(part, rotated)
+        sheets[si]["placements"].append(
+            Placement(
+                uid=f"{part.uid}-{copy_no}", name=part.name, x=fr.x, y=fr.y, w=w, h=h,
+                original_length=part.length, original_width=part.width, rotated=rotated,
+                edge_left=left, edge_right=right, edge_top=top, edge_bottom=bottom,
+                rotate_allowed=part.rotate,
+            )
+        )
+
+    plans: list[SheetPlan] = []
+    for index, sheet in enumerate(sheets, 1):
+        leftovers: list[FreeRect] = []
+        for fr in _prune_free_rects(sheet["free"]):
+            # Ishlatilgan detallar orasidagi arra izi qoldiq sifatida hisoblanmaydi.
+            w = max(0, fr.w - kerf)
+            h = max(0, fr.h - kerf)
+            if w >= 80 and h >= 80:
+                leftovers.append(FreeRect(fr.x, fr.y, w, h))
+        leftovers.sort(key=lambda r: r.w * r.h, reverse=True)
+        plans.append(SheetPlan(index, sheet_length, sheet_width, sheet["placements"], leftovers, variant_name))
+    return plans
+
+
+def _plan_score(plans: list[SheetPlan]) -> tuple[Any, ...]:
+    # 1) listlar soni kam; 2) yirik qoldiq ko'p; 3) qoldiq bo'laklari kam; 4) detallar bir burchakka zich.
+    largest_areas = [max((r.w * r.h for r in p.leftovers), default=0) for p in plans]
+    total_largest = sum(largest_areas)
+    fragment_count = sum(len(p.leftovers) for p in plans)
+    bounding = 0
+    for plan in plans:
+        if plan.placements:
+            min_x = min(p.x for p in plan.placements)
+            min_y = min(p.y for p in plan.placements)
+            max_x = max(p.x + p.w for p in plan.placements)
+            max_y = max(p.y + p.h for p in plan.placements)
+            bounding += (max_x - min_x) * (max_y - min_y)
+    last_largest = largest_areas[-1] if largest_areas else 0
+    return (len(plans), -total_largest, fragment_count, bounding, -last_largest)
+
+
+def pack_parts(
+    parts: Iterable[Part], sheet_length: int, sheet_width: int, kerf: int, trim: int,
+    optimization_mode: str = "large",
+) -> tuple[list[SheetPlan], int, str]:
+    """Ko'p variantni tekshiradi va list soni/qoldiq bo'yicha eng yaxshisini qaytaradi."""
+    expanded = _expanded_parts(parts)
+    if not expanded:
+        return [], 0, ""
+
+    if optimization_mode == "fast":
+        limit = 60
+    elif optimization_mode == "full":
+        limit = 120
+    else:
+        limit = 240
+
+    # Juda ko'p detal bo'lsa eski kompyuterda uzoq kutmasligi uchun kamayadi,
+    # ammo baribir 48 tadan ko'p variant tekshiriladi.
+    if len(expanded) > 1200:
+        limit = min(limit, 60)
+    elif len(expanded) > 500:
+        limit = min(limit, 80)
+    elif len(expanded) > 250:
+        limit = min(limit, 120)
+
+    sort_modes = ["area", "max_side", "length", "width", "perimeter", "thin_first", "square_first"]
+    heuristics = ["large_offcut", "compact", "best_area", "long_side"]
+    splits = ["auto", "vertical", "horizontal"]
+    variants: list[tuple[str, str, str, int]] = []
+    # Avval turli detal tartiblari va avtomatik bo'lish usuli sinovdan o'tadi.
+    # Shuning uchun Tezkor rejim ham faqat bitta tartibga qamalib qolmaydi.
+    for heuristic in heuristics:
+        for sort_mode in sort_modes:
+            variants.append((sort_mode, heuristic, "auto", 0))
+    # Keyin vertikal va gorizontal kesim ustuvorligi alohida tekshiriladi.
+    for split in ("vertical", "horizontal"):
+        for heuristic in ("large_offcut", "best_area"):
+            for sort_mode in sort_modes:
+                variants.append((sort_mode, heuristic, split, 0))
+    # Bir xil/yaqin o'lchamli detallar uchun qo'shimcha tartib variantlari.
+    for seed in range(1, 101):
+        variants.append(("area", "large_offcut", "auto", seed))
+        variants.append(("max_side", "compact", "auto", seed))
+
+    best_plans: list[SheetPlan] | None = None
+    best_score: tuple[Any, ...] | None = None
+    best_name = ""
+    tested = 0
+    for sort_mode, heuristic, split, seed in variants[:limit]:
+        ordered = _ordered_parts(expanded, sort_mode, seed)
+        name = f"{sort_mode}/{heuristic}/{split}" + (f"/s{seed}" if seed else "")
+        plans = _pack_once(ordered, sheet_length, sheet_width, kerf, trim, heuristic, split, name)
+        score = _plan_score(plans)
+        tested += 1
+        if best_score is None or score < best_score:
+            best_score = score
+            best_plans = plans
+            best_name = name
+
+    assert best_plans is not None
+    return best_plans, tested, best_name
+
+def sheet_usage(plan: SheetPlan) -> float:
+    total = plan.width * plan.height
+    used = sum(p.w * p.h for p in plan.placements)
+    return round((used / total * 100) if total else 0, 1)
+
+
+def largest_offcut(plan: SheetPlan) -> FreeRect | None:
+    return max(plan.leftovers, key=lambda r: r.w * r.h, default=None)
+
+
+def offcut_text(plan: SheetPlan) -> str:
+    r = largest_offcut(plan)
+    if not r:
+        return "Qoldiq yo'q"
+    return f"Eng katta qoldiq {r.w}×{r.h} mm"
+
+
+def edge_letters(p: Placement | Part) -> str:
+    values = []
+    if p.edge_top:
+        values.append("T")
+    if p.edge_bottom:
+        values.append("P")
+    if p.edge_left:
+        values.append("Ch")
+    if p.edge_right:
+        values.append("O")
+    return ", ".join(values) if values else "yo'q"
 
 
 
+def edge_length_mm_values(
+    length: int,
+    width: int,
+    qty: int,
+    edge_left: bool,
+    edge_right: bool,
+    edge_top: bool,
+    edge_bottom: bool,
+) -> int:
+    return max(0, qty) * (
+        (length if edge_top else 0)
+        + (length if edge_bottom else 0)
+        + (width if edge_left else 0)
+        + (width if edge_right else 0)
+    )
 
-# PHARM_MEBEL_SPLASH_LOGO_CLOCK_V1
-SPLASH_HTML = '<!doctype html>\n<html lang="uz">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width,initial-scale=1">\n<title>Pharm Mebel</title>\n<style>\n*{box-sizing:border-box}\nhtml,body{margin:0;min-height:100%;font-family:Arial,sans-serif}\nbody{\n  min-height:100vh;display:grid;place-items:center;overflow:hidden;color:#14532d;\n  background:\n    radial-gradient(circle at 15% 18%,rgba(134,239,172,.50),transparent 34%),\n    radial-gradient(circle at 85% 82%,rgba(187,247,208,.78),transparent 38%),\n    linear-gradient(145deg,#fbfffc,#dcfce7);\n}\n.splash{\n  width:min(830px,94vw);min-height:min(680px,94vh);padding:24px 30px;\n  border:1px solid rgba(34,197,94,.25);border-radius:30px;\n  background:rgba(255,255,255,.84);box-shadow:0 28px 80px rgba(20,83,45,.18);\n  backdrop-filter:blur(13px);display:flex;flex-direction:column;align-items:center;\n  justify-content:center;text-align:center;animation:appear .65s ease both;\n}\n.logo{\n  width:min(680px,96%);max-height:385px;object-fit:contain;border-radius:22px;\n  filter:drop-shadow(0 14px 20px rgba(20,83,45,.13));animation:logoIn .9s ease both;\n}\n.clock{\n  margin-top:5px;font-size:clamp(48px,9vw,86px);line-height:1;font-weight:900;\n  letter-spacing:4px;color:#166534;text-shadow:0 4px 18px rgba(22,101,52,.13);\n}\n.date{margin-top:11px;font-size:clamp(16px,3vw,23px);font-weight:700;color:#3f7a52}\n.welcome{margin-top:17px;font-size:clamp(18px,3vw,23px);font-weight:900}\n.status{margin-top:7px;font-size:14px;color:#568467}\n.progress{\n  width:min(500px,84%);height:8px;margin-top:18px;overflow:hidden;\n  border-radius:999px;background:#d1fae5;\n}\n.bar{\n  width:0;height:100%;border-radius:999px;\n  background:linear-gradient(90deg,#4ade80,#15803d);animation:loading 5s linear forwards;\n}\n.enter{\n  margin-top:16px;padding:12px 28px;border:0;border-radius:13px;background:#16a34a;\n  color:#fff;font-size:16px;font-weight:800;cursor:pointer;\n  box-shadow:0 9px 24px rgba(22,163,74,.25);\n}\n.enter:hover{background:#15803d}\n@keyframes appear{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:scale(1)}}\n@keyframes logoIn{from{opacity:0;transform:translateY(-15px)}to{opacity:1;transform:translateY(0)}}\n@keyframes loading{to{width:100%}}\n@media(max-width:600px){\n  .splash{min-height:94vh;padding:17px 12px;border-radius:22px}\n  .logo{width:100%;max-height:300px}\n  .clock{letter-spacing:2px}\n}\n</style>\n</head>\n<body>\n<section class="splash">\n  <img class="logo" src="data:image/jpeg;base64,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ZdVmJ36wSATABEgAABJSVIAAAExMDmnSua05+f1U18vnzj8h4K3xe2antldO5VRVfvqmKosiRFRKEiEoRJIkUplMJhACJQppqiFFFdKLdFy2rZ8/o89WE0reNM5+W1h87g8ObCbNrWy9+nU9q1bae7umJjTREwSBEwBEYb5o+mfmenNRGQ2TPLE/RXy11i+vV4NemjhO/wDDsudO0YymOF+hPnr6EvptkTGvTwPSt20nDj6d2PjnY79CYX1mEiJI+bcBn9fx4ux9N5l03XrmHgm3H9GzGLx4+t9K17YNOpxnsvGkc137Qt6z5u7jbtQRBKbPnf6I+daY6x1zkfW65dYmJ26QWAAAAAAAmmYJAAATBMSKebdK5rTDn1dNXL51Xg93grfFbbqW2V07nXTXfvmqJixHjiPTHz74cuX6QcGu2nujhVw7lXw/ZV+nKatdgWRJEAiYIU1UQportlNuqiK2vPf81Yxmn7hqPPzW8HnsBhz4PZNb2P0L9T2zUdu7e6RppCRAETAERifmX6a+Zac/u+hvnn6cR8yUda45Wn0dkuG5+ddJx1jqsZbtw36P+braYH6G+ePoWK7fExr1cF0nddJw4crnNcys2yE+CpPQOl8u6hrvMTC/zhr2xa7jx57N6/lbW9WAy2MrW113im0J79OMyevXHGuzcajPmnu8Prx5NieVfX053V87a3cpprv0x86/RXztTHV+uci65XLrExO3WCUwCYAAAAAAAAAJiYJIHNelc0pz6BVRVy+fcx2Rx1b4ratU2uunda6a9PQmqmqsx4fb4M6cV1Db9O5PHiY6H19HP3d5ttwncMpiJp3uaard0krwkimSSFuIWbemxXc6eD11x7nRpWy1t6rFdlbwajtGq4YU4LNYHHnw2xa5sXfbqm3aht/b3SNNETAABAiMT8yfTnzHTm93078xfTyY4L37BW0+brty3jyZn6G1zbdOq383fSXzdFdf+hfnn6HU24adXBNJ3bSMeLpnZeOdj06UwtomJkiaYfOWvZ/X8eHsnS+ZdOv1rVyLX45zbvfBM+Pdu7/NP0nptc432PjZzXedF3rLDusw17ZEwmJS+dvor52pjqnXeSdbrj1hDbslELVolEkEwAAAAESAAAExMExIp5p0vm1Ofn1VFfL51eOyOOrfF7Xq21027nVTVr31liEaRrGic/L78f7a6cHm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" alt="Pharm Mebel logosi">\n  <div id="clock" class="clock">00:00:00</div>\n  <div id="date" class="date"></div>\n  <div class="welcome">Pharm Mebel dasturiga xush kelibsiz</div>\n  <div class="status">Dastur ochilmoqda...</div>\n  <div class="progress"><div class="bar"></div></div>\n  <button class="enter" type="button" onclick="goNext()">Kirish</button>\n</section>\n<script>\nconst NEXT_URL = {{ next_url|tojson }};\nconst DAYS = ["Yakshanba","Dushanba","Seshanba","Chorshanba","Payshanba","Juma","Shanba"];\nconst MONTHS = ["yanvar","fevral","mart","aprel","may","iyun",\n                "iyul","avgust","sentabr","oktabr","noyabr","dekabr"];\nfunction two(n){ return String(n).padStart(2,"0"); }\nfunction updateClock(){\n  // UTC vaqtiga aniq 5 soat qo‘shiladi. Bu eski Windows 7 brauzerlarida ham ishlaydi.\n  const now = new Date(Date.now() + 5*60*60*1000);\n  document.getElementById("clock").textContent =\n    two(now.getUTCHours())+":"+two(now.getUTCMinutes())+":"+two(now.getUTCSeconds());\n  document.getElementById("date").textContent =\n    DAYS[now.getUTCDay()]+", "+now.getUTCDate()+" "+MONTHS[now.getUTCMonth()]+" "+now.getUTCFullYear()+" · Toshkent";\n}\nlet leaving = false;\nfunction goNext(){\n  if(leaving) return;\n  leaving = true;\n  document.body.style.transition = "opacity .35s ease";\n  document.body.style.opacity = "0";\n  setTimeout(() => window.location.replace(NEXT_URL), 330);\n}\nupdateClock();\nsetInterval(updateClock,1000);\nsetTimeout(goNext,5000);\n</script>\n</body>\n</html>'
 
-@app.before_request
-def require_login():
-    _auto_backup_if_needed()
-    public_endpoints = {
-        "splash",
-        "login", "admin_setup", "static", "public_track", "order_qr",
-        "worker_register", "worker_verify", "worker_login", "worker_logout", "driver_login", "driver_logout", "driver_register",
-        "manager_login", "manager_logout", "constructor_login", "constructor_logout"
+def parts_edge_m(parts: Iterable[Any]) -> float:
+    total_mm = 0
+    for p in parts:
+        get = (lambda key, default=0: p[key] if key in p.keys() else default) if isinstance(p, sqlite3.Row) else (lambda key, default=0: getattr(p, key, default))
+        total_mm += edge_length_mm_values(
+            int(get("length", 0)),
+            int(get("width", 0)),
+            int(get("qty", 1)),
+            bool(get("edge_left", False)),
+            bool(get("edge_right", False)),
+            bool(get("edge_top", False)),
+            bool(get("edge_bottom", False)),
+        )
+    return round((total_mm / 1000.0) * EDGE_MULTIPLIER, 3)
+
+
+def plan_edge_m(plan: SheetPlan) -> float:
+    total_mm = 0
+    for p in plan.placements:
+        total_mm += (
+            (p.w if p.edge_top else 0)
+            + (p.w if p.edge_bottom else 0)
+            + (p.h if p.edge_left else 0)
+            + (p.h if p.edge_right else 0)
+        )
+    return round((total_mm / 1000.0) * EDGE_MULTIPLIER, 3)
+
+
+def plan_to_dict(plan: SheetPlan) -> dict[str, Any]:
+    return {
+        "number": plan.number, "width": plan.width, "height": plan.height,
+        "placements": [asdict(p) for p in plan.placements],
+        "leftovers": [asdict(r) for r in plan.leftovers],
+        "variant": plan.variant,
     }
-    # CSRF tekshiruvi: barcha oddiy HTML-forma orqali yuboriladigan POST so'rovlar uchun.
-    # /api/ yo'nalishlari brauzerdagi JS orqali (fetch, o'sha domendan) chaqiriladi, shuning
-    # uchun bu yerda tekshirilmaydi.
-    if request.method == 'POST' and not request.path.startswith('/api/'):
-        if not _csrf_valid():
-            return "Xato: sessiya muddati tugagan yoki noto'g'ri so'rov (CSRF). Sahifani qayta yuklab, qayta urinib ko'ring.", 400
-    if request.endpoint in public_endpoints or request.path.startswith('/ishchi/public/'):
-        return None
-    if request.path.startswith('/ishchi/'):
-        if not session.get("worker_account_id"):
-            return redirect(url_for("worker_login"))
-        return None
-    if request.path.startswith('/shofyor/'):
-        if not session.get("driver_account_id"):
-            return redirect(url_for("driver_login"))
-        return None
-    if request.path.startswith('/menejer/'):
-        if session.get("staff_role") != "menejer" and not session.get("logged_in"):
-            return redirect(url_for("manager_login"))
-        return None
-    if request.path.startswith('/konstruktor/'):
-        if session.get("staff_role") != "konstruktor" and not session.get("logged_in"):
-            return redirect(url_for("constructor_login"))
-        return None
-    if not session.get("logged_in"):
-        return redirect(url_for("login"))
 
 
-def _admin_account(login):
-    c = get_db()
-    row = c.execute(
-        "SELECT id,login,parol_hash,faol FROM admin_akkauntlari WHERE login=? LIMIT 1",
-        ((login or "").strip(),),
+def dict_to_plan(data: dict[str, Any]) -> SheetPlan:
+    return SheetPlan(
+        number=int(data["number"]),
+        width=int(data["width"]),
+        height=int(data["height"]),
+        placements=[Placement(**({"rotate_allowed": True, **p})) for p in data["placements"]],
+        leftovers=[FreeRect(**r) for r in data.get("leftovers", [])],
+        variant=str(data.get("variant", "")),
+    )
+
+
+
+def _add_customer_update(
+    conn: sqlite3.Connection,
+    job_id: int,
+    event_key: str,
+    title: str,
+    message: str = "",
+    stage: str = "",
+    progress: int = 0,
+) -> bool:
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO customer_updates(job_id,event_key,title,message,stage,progress,created_at)
+           VALUES(?,?,?,?,?,?,?)""",
+        (job_id, event_key[:120], title[:140], message[:500], stage[:80], max(0, min(100, int(progress))), now_iso()),
+    )
+    return cur.rowcount == 1
+
+
+def _job_progress_from_counts(total: int, cuts: int, edges: int, delivery_status: str = "Kutilmoqda") -> int:
+    if total <= 0:
+        base = 0
+    else:
+        base = round(((cuts + edges) / (total * 2)) * 80)
+    if delivery_status == "Yetkazishga tayyor":
+        return max(base, 85)
+    if delivery_status == "Yo'lda":
+        return max(base, 95)
+    if delivery_status == "Yetkazildi":
+        return 100
+    return min(80, base)
+
+
+def _progress_snapshot(conn: sqlite3.Connection, job_id: int) -> dict[str, Any]:
+    stats = conn.execute(
+        """SELECT COUNT(*) total,COALESCE(SUM(cut_done),0) cuts,COALESCE(SUM(edge_done),0) edges
+           FROM kroy_sheets WHERE job_id=?""",
+        (job_id,),
     ).fetchone()
-    c.close()
-    return row
+    job = conn.execute("SELECT status,delivery_status FROM kroy_jobs WHERE id=?", (job_id,)).fetchone()
+    total = int(stats["total"] or 0)
+    cuts = int(stats["cuts"] or 0)
+    edges = int(stats["edges"] or 0)
+    delivery = (job["delivery_status"] if job else "Kutilmoqda") or "Kutilmoqda"
+    progress = _job_progress_from_counts(total, cuts, edges, delivery)
+    if delivery == "Yetkazildi":
+        stage = "Buyurtma yetkazildi"
+    elif delivery == "Yo'lda":
+        stage = "Buyurtma yo'lda"
+    elif delivery == "Yetkazishga tayyor":
+        stage = "Yetkazishga tayyor"
+    elif total and edges == total:
+        stage = "Kroy va kromka tayyor"
+    elif cuts:
+        stage = "Kromka ishlari davom etmoqda" if total and cuts == total else "Kroy ishlari davom etmoqda"
+    else:
+        stage = "Buyurtma qabul qilindi"
+    return {"total": total, "cuts": cuts, "edges": edges, "progress": progress, "stage": stage, "delivery_status": delivery}
 
 
-def _admin_is_configured():
-    c = get_db()
-    row = c.execute("SELECT id FROM admin_akkauntlari WHERE faol=1 LIMIT 1").fetchone()
-    c.close()
+def _customer_stages(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    total = int(snapshot["total"] or 0)
+    cuts = int(snapshot["cuts"] or 0)
+    edges = int(snapshot["edges"] or 0)
+    delivery = snapshot["delivery_status"]
+    flags = [
+        ("Buyurtma", True),
+        ("Kroy", bool(total and cuts == total)),
+        ("Kromka", bool(total and edges == total)),
+        ("Yo'lda", delivery in {"Yo'lda", "Yetkazildi"}),
+        ("Yetkazildi", delivery == "Yetkazildi"),
+    ]
+    result = []
+    current_used = False
+    for name, done in flags:
+        state = "done" if done else ""
+        if not done and not current_used:
+            state = "current"
+            current_used = True
+        result.append({"name": name, "state": state})
+    return result
+
+def save_job(meta: dict[str, Any], parts: list[Part], plans: list[SheetPlan]) -> tuple[int, str]:
+    token = secrets.token_urlsafe(24)
+    now = now_iso()
+    conn = get_db()
+    cur = conn.execute(
+        """INSERT INTO kroy_jobs(
+               order_code,customer,material,sheet_length,sheet_width,kerf,trim,worker_name,token,status,created_at,sent_at,
+               optimization_mode,tested_variants,best_variant,worker_link_active,worker_token_created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,'Ishchiga yuborildi',?,?,?,?,?,1,?)""",
+        (
+            meta["order_code"], meta.get("customer", ""), meta["material"], meta["sheet_length"], meta["sheet_width"],
+            meta["kerf"], meta["trim"], meta.get("worker_name", ""), token, now, now,
+            meta.get("optimization_mode", "large"), int(meta.get("tested_variants", 0)), meta.get("best_variant", ""), now,
+        ),
+    )
+    job_id = int(cur.lastrowid)
+    customer_token = secrets.token_urlsafe(24)
+    conn.execute(
+        "UPDATE kroy_jobs SET customer_token=?,customer_link_active=1,delivery_status='Kutilmoqda' WHERE id=?",
+        (customer_token, job_id),
+    )
+    _add_customer_update(
+        conn, job_id, "order-created", "Buyurtma qabul qilindi",
+        f"{meta['order_code']} buyurtmasi tizimga kiritildi va konstruktor ishiga yuborildi.",
+        "Buyurtma", 0,
+    )
+    conn.executemany(
+        """INSERT INTO kroy_parts(job_id,uid,name,length,width,qty,rotate,edge_left,edge_right,edge_top,edge_bottom)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        [
+            (
+                job_id, p.uid, p.name, p.length, p.width, p.qty, int(p.rotate), int(p.edge_left), int(p.edge_right),
+                int(p.edge_top), int(p.edge_bottom),
+            )
+            for p in parts
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO kroy_sheets(job_id,sheet_no,plan_json) VALUES(?,?,?)",
+        [(job_id, plan.number, json.dumps(plan_to_dict(plan), ensure_ascii=False)) for plan in plans],
+    )
+    conn.commit()
+    conn.close()
+    return job_id, token
+
+
+def load_job(job_id: int | None = None, token: str | None = None) -> tuple[sqlite3.Row, list[sqlite3.Row], list[tuple[sqlite3.Row, SheetPlan]]]:
+    conn = get_db()
+    if job_id is not None:
+        job = conn.execute("SELECT * FROM kroy_jobs WHERE id=?", (job_id,)).fetchone()
+    else:
+        job = conn.execute("SELECT * FROM kroy_jobs WHERE token=?", (token,)).fetchone()
+        if job and not int(job["worker_link_active"] or 0):
+            conn.close()
+            abort(410)
+    if not job:
+        conn.close()
+        abort(404)
+    parts = conn.execute("SELECT * FROM kroy_parts WHERE job_id=? ORDER BY id", (job["id"],)).fetchall()
+    sheet_rows = conn.execute("SELECT * FROM kroy_sheets WHERE job_id=? ORDER BY sheet_no", (job["id"],)).fetchall()
+    sheets = [(row, dict_to_plan(json.loads(row["plan_json"]))) for row in sheet_rows]
+    conn.close()
+    return job, parts, sheets
+
+
+def svg_for_plan(plan: SheetPlan, compact: bool = False) -> str:
+    view_w, view_h = plan.width, plan.height
+    font = 34 if compact else 42
+    elements = [f'<svg class="sheet-svg" viewBox="0 0 {view_w} {view_h}" xmlns="http://www.w3.org/2000/svg" aria-label="Kroy list {plan.number}">']
+    elements.append(f'<rect x="0" y="0" width="{view_w}" height="{view_h}" fill="#ffffff" stroke="#0f172a" stroke-width="10"/>')
+    largest = largest_offcut(plan)
+    for r in plan.leftovers:
+        is_largest = largest is not None and (r.x, r.y, r.w, r.h) == (largest.x, largest.y, largest.w, largest.h)
+        fill = "#fb7185" if is_largest else "#fecdd3"
+        opacity = "0.72" if is_largest else "0.48"
+        elements.append(f'<rect x="{r.x}" y="{r.y}" width="{r.w}" height="{r.h}" fill="{fill}" fill-opacity="{opacity}" stroke="#be123c" stroke-width="5"/>')
+        if r.w >= 240 and r.h >= 120:
+            fs = max(20, min(38, int(min(r.w, r.h) * .13)))
+            elements.append(f'<text x="{r.x+r.w/2}" y="{r.y+r.h/2}" text-anchor="middle" font-size="{fs}" font-weight="700" fill="#881337">Qoldiq {r.w}×{r.h}</text>')
+    for idx, p in enumerate(plan.placements, 1):
+        fill = "#eff6ff" if idx % 2 else "#f8fafc"
+        elements.append(f'<rect x="{p.x}" y="{p.y}" width="{p.w}" height="{p.h}" fill="{fill}" stroke="#475569" stroke-width="5"/>')
+        min_dim = min(p.w, p.h)
+        label_font = max(22, min(font, int(min_dim * .18)))
+        cx, cy = p.x + p.w / 2, p.y + p.h / 2
+
+        # Kromka belgisi detalning eng tashqi chegarasida emas,
+        # markazdagi nom/o'lcham yozuvi atrofida qisqa chiziq bilan ko'rsatiladi.
+        # Shu sabab yonma-yon detallar va list tashqi chegarasi bilan aralashmaydi.
+        edge_stroke = "#dc2626"
+        sw = max(9, min(17, int(min_dim * .055)))
+        # Belgilar markazdagi o'lcham yozuvining to'rt tomonida turadi.
+        dims_y = cy + label_font * .35
+        marker_cy = dims_y - label_font * .28
+        marker_half_w = max(18, min(p.w * .34, label_font * 3.8))
+        marker_half_h = max(12, min(p.h * .24, label_font * .62))
+        h_len = max(16, min(p.w * .26, label_font * 2.5))
+        v_len = max(14, min(p.h * .25, label_font * 1.35))
+        if p.edge_top:
+            y_mark = marker_cy - marker_half_h
+            elements.append(f'<line x1="{cx-h_len/2}" y1="{y_mark}" x2="{cx+h_len/2}" y2="{y_mark}" stroke="{edge_stroke}" stroke-width="{sw}" stroke-linecap="round"/>')
+        if p.edge_bottom:
+            y_mark = marker_cy + marker_half_h
+            elements.append(f'<line x1="{cx-h_len/2}" y1="{y_mark}" x2="{cx+h_len/2}" y2="{y_mark}" stroke="{edge_stroke}" stroke-width="{sw}" stroke-linecap="round"/>')
+        if p.edge_left:
+            x_mark = cx - marker_half_w
+            elements.append(f'<line x1="{x_mark}" y1="{marker_cy-v_len/2}" x2="{x_mark}" y2="{marker_cy+v_len/2}" stroke="{edge_stroke}" stroke-width="{sw}" stroke-linecap="round"/>')
+        if p.edge_right:
+            x_mark = cx + marker_half_w
+            elements.append(f'<line x1="{x_mark}" y1="{marker_cy-v_len/2}" x2="{x_mark}" y2="{marker_cy+v_len/2}" stroke="{edge_stroke}" stroke-width="{sw}" stroke-linecap="round"/>')
+        name = p.name[:16].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        elements.append(f'<text x="{cx}" y="{cy-label_font*.95}" text-anchor="middle" font-size="{label_font}" font-weight="700" fill="#0f172a">#{idx} {name}</text>')
+        elements.append(f'<text x="{cx}" y="{dims_y}" text-anchor="middle" font-size="{max(20,label_font-7)}" fill="#334155">{p.original_length}×{p.original_width}{" ↻" if p.rotated else ""}</text>')
+        if not p.rotate_allowed and min_dim > 130:
+            elements.append(f'<text x="{cx}" y="{cy+label_font*1.35}" text-anchor="middle" font-size="{max(18,label_font-10)}" font-weight="700" fill="#7c3aed">GUL ↕</text>')
+    elements.append("</svg>")
+    return "".join(elements)
+
+
+def qr_data_uri(url: str) -> str:
+    if qrcode is None:
+        return ""
+    img = qrcode.make(url)
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(out.getvalue()).decode("ascii")
+
+
+def _fit_text(c: canvas.Canvas, text: str, max_width: float, start_size: float, min_size: float = 5) -> float:
+    size = start_size
+    while size > min_size and stringWidth(pdf_text(text), PDF_FONT, size) > max_width:
+        size -= 0.5
+    return size
+
+
+def draw_plan_pdf(c: canvas.Canvas, plan: SheetPlan, job: sqlite3.Row, x: float, y: float, w: float, h: float) -> None:
+    c.saveState()
+    c.setStrokeColor(colors.HexColor("#0f172a"))
+    c.setLineWidth(0.8)
+    c.rect(x, y, w, h)
+    header_h = 43
+    footer_h = 24
+    c.setFont(PDF_FONT_BOLD, 9)
+    c.drawString(x + 7, y + h - 13, pdf_text(f"Mebel360 | {job['order_code']} | {job['material']}"))
+    c.setFont(PDF_FONT, 7)
+    c.drawString(x + 7, y + h - 24, pdf_text(f"List {plan.number}: {plan.width}x{plan.height} mm | Ishchi: {job['worker_name'] or '-'} | Foydalanish: {sheet_usage(plan)}%"))
+    c.drawRightString(x + w - 7, y + h - 24, pdf_text(f"Kromka x1.1: {plan_edge_m(plan):.2f} m"))
+    c.drawString(
+        x + 7, y + h - 35,
+        pdf_text(f"Hisoblash: {optimization_label(job['optimization_mode'])} | Tekshirildi: {job['tested_variants']} variant")
+    )
+
+    draw_x = x + 8
+    draw_y = y + footer_h + 5
+    draw_w = w - 16
+    draw_h = h - header_h - footer_h - 10
+    scale = min(draw_w / plan.width, draw_h / plan.height)
+    actual_w = plan.width * scale
+    actual_h = plan.height * scale
+    ox = draw_x + (draw_w - actual_w) / 2
+    oy = draw_y + (draw_h - actual_h) / 2
+
+    c.setFillColor(colors.white)
+    c.setStrokeColor(colors.black)
+    c.setLineWidth(0.7)
+    c.rect(ox, oy, actual_w, actual_h, fill=1, stroke=1)
+
+    largest = largest_offcut(plan)
+    for r in plan.leftovers:
+        rx = ox + r.x * scale
+        ry = oy + actual_h - (r.y + r.h) * scale
+        rw, rh = r.w * scale, r.h * scale
+        is_largest = largest is not None and (r.x, r.y, r.w, r.h) == (largest.x, largest.y, largest.w, largest.h)
+        c.setFillColor(colors.HexColor("#fb7185" if is_largest else "#fecdd3"))
+        c.setStrokeColor(colors.HexColor("#be123c"))
+        c.setLineWidth(0.35)
+        c.rect(rx, ry, rw, rh, fill=1, stroke=1)
+        label = f"Qoldiq {r.w}x{r.h}"
+        if rw > 55 and rh > 14:
+            c.setFillColor(colors.HexColor("#881337"))
+            label_size = _fit_text(c, label, rw - 6, min(6.5, max(4, rh / 5)), 3.5)
+            if stringWidth(pdf_text(label), PDF_FONT_BOLD, label_size) <= rw - 6:
+                c.setFont(PDF_FONT_BOLD, label_size)
+                c.drawCentredString(rx + rw / 2, ry + rh / 2, pdf_text(label))
+            elif rh > 70 and rw > 14:
+                rotated_size = _fit_text(c, label, rh - 6, min(6.5, max(4, rw / 4)), 3.5)
+                c.saveState()
+                c.translate(rx + rw / 2, ry + rh / 2)
+                c.rotate(90)
+                c.setFont(PDF_FONT_BOLD, rotated_size)
+                c.drawCentredString(0, -rotated_size / 3, pdf_text(label))
+                c.restoreState()
+
+    for idx, p in enumerate(plan.placements, 1):
+        px = ox + p.x * scale
+        # SVGda y pastga, PDFda y yuqoriga; joylashni ag'daramiz
+        py = oy + actual_h - (p.y + p.h) * scale
+        pw, ph = p.w * scale, p.h * scale
+        c.setFillColor(colors.HexColor("#f8fafc") if idx % 2 else colors.HexColor("#eef2ff"))
+        c.setStrokeColor(colors.HexColor("#64748b"))
+        c.setLineWidth(0.35)
+        c.rect(px, py, pw, ph, fill=1, stroke=1)
+
+        label = f"#{idx} {p.name[:12]}"
+        dims = f"{p.original_length}x{p.original_width}{' R' if p.rotated else ''}{' GUL' if not p.rotate_allowed else ''}"
+        edge = f"K:{edge_letters(p)}" if any((p.edge_left,p.edge_right,p.edge_top,p.edge_bottom)) else ""
+        font_size = _fit_text(c, label, max(8, pw - 3), min(7.5, max(4.5, ph / 4)), 3.8)
+        c.setFillColor(colors.black)
+        c.setFont(PDF_FONT_BOLD, font_size)
+        label_y = py + ph / 2 + font_size * .80
+        c.drawCentredString(px + pw / 2, label_y, pdf_text(label))
+        dim_font = max(3.5, font_size - 0.8)
+        dims_y = py + ph / 2 - font_size * .15
+        c.setFont(PDF_FONT, dim_font)
+        c.drawCentredString(px + pw / 2, dims_y, pdf_text(dims))
+
+        # A4da ham kromka detal tashqi chetida emas, o'lcham yozuvi atrofida turadi.
+        if any((p.edge_left, p.edge_right, p.edge_top, p.edge_bottom)):
+            cx_pdf = px + pw / 2
+            marker_cy = dims_y + dim_font * .25
+            dims_width = stringWidth(pdf_text(dims), PDF_FONT, dim_font)
+            marker_half_w = max(5, min(pw * .34, dims_width / 2 + 6))
+            marker_half_h = max(3.5, min(ph * .22, dim_font * .75))
+            h_len = max(5, min(pw * .25, max(8, dims_width * .48)))
+            v_len = max(4, min(ph * .22, font_size * 1.25))
+            c.setStrokeColor(colors.HexColor("#dc2626"))
+            c.setLineWidth(1.8)
+            if p.edge_top:
+                y_mark = marker_cy + marker_half_h
+                c.line(cx_pdf - h_len / 2, y_mark, cx_pdf + h_len / 2, y_mark)
+            if p.edge_bottom:
+                y_mark = marker_cy - marker_half_h
+                c.line(cx_pdf - h_len / 2, y_mark, cx_pdf + h_len / 2, y_mark)
+            if p.edge_left:
+                x_mark = cx_pdf - marker_half_w
+                c.line(x_mark, marker_cy - v_len / 2, x_mark, marker_cy + v_len / 2)
+            if p.edge_right:
+                x_mark = cx_pdf + marker_half_w
+                c.line(x_mark, marker_cy - v_len / 2, x_mark, marker_cy + v_len / 2)
+            c.setStrokeColor(colors.black)
+
+    c.setFillColor(colors.black)
+    footer = "Kromka x1.1 | T=tepa, P=past, Ch=chap, O=o'ng | GUL=aylantirilmaydi | Qoldiq=pushti"
+    footer_size = _fit_text(c, footer, w - 14, 6.5, 4.2)
+    c.setFont(PDF_FONT, footer_size)
+    c.drawString(x + 7, y + 8, pdf_text(footer))
+    c.restoreState()
+
+
+def build_pdf(job: sqlite3.Row, sheets: list[tuple[sqlite3.Row, SheetPlan]]) -> io.BytesIO:
+    out = io.BytesIO()
+    c = canvas.Canvas(out, pagesize=A4)
+    page_w, page_h = A4
+    margin = 18
+    gap = 10
+    slot_h = (page_h - 2 * margin - gap) / 2
+    slot_w = page_w - 2 * margin
+    for index, (_, plan) in enumerate(sheets):
+        slot = index % 2
+        if index and slot == 0:
+            c.showPage()
+        y = page_h - margin - slot_h if slot == 0 else margin
+        draw_plan_pdf(c, plan, job, margin, y, slot_w, slot_h)
+    c.save()
+    out.seek(0)
+    return out
+
+
+BASE_TEMPLATE = r"""
+<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ title }}</title><style>""" + BASE_CSS + r"""</style></head>
+<body><header><div class="top"><div><div class="brand"><span class="brand-mark">360°</span>Mebel360° <span class="module-pill">BOSHQARUV PRO V9</span></div><div class="sub">Konstruktor · menejer · ishchi · shafyor · mijoz kuzatuvi</div></div>
+{% if session.get('admin_user_id') %}<div class="navbar no-print"><a class="navlink" href="{{ url_for('dashboard') }}">Boshqaruv</a>{% if session.get('user_role') in ['admin','constructor'] %}<a class="navlink" href="{{ url_for('constructor') }}">Konstruktor</a>{% endif %}{% if session.get('user_role') in ['admin','manager'] %}<a class="navlink" href="{{ url_for('manager_dashboard') }}">Menejer</a>{% endif %}{% if session.get('user_role') in ['admin','manager','constructor','worker'] %}<a class="navlink" href="{{ url_for('worker_center') }}">Ishchi</a>{% endif %}{% if session.get('user_role') in ['admin','manager','driver'] %}<a class="navlink" href="{{ url_for('driver_dashboard') }}">Shafyor</a>{% endif %}{% if session.get('user_role')=='admin' %}<a class="navlink" href="{{ url_for('users') }}">Xodimlar</a>{% endif %}<span class="role-chip">{{ role_labels.get(session.get('user_role','admin'),'Rahbar') }} · {{ session.get('admin_username','') }}</span><form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="btn2" type="submit">Chiqish</button></form></div>{% else %}<div class="top-actions no-print"><a class="btn light" href="{{ url_for('login') }}">Kirish</a></div>{% endif %}</div></header>
+<div class="wrap">{% with msgs=get_flashed_messages(with_categories=true) %}{% for cat,msg in msgs %}<div class="flash {{ 'bad' if cat=='bad' else '' }}">{{ msg }}</div>{% endfor %}{% endwith %}{{ body|safe }}</div></body></html>
+"""
+
+
+AUTH_BODY = r"""
+<div class="auth-wrap">
+  <div class="panel">
+    {% if setup %}
+      <h2>Birinchi xavfsiz sozlash</h2>
+      <div class="auth-note">Rahbar paroli TXT faylga yozilmaydi va CMD oynasida ko'rsatilmaydi. U bazada faqat shifrlangan holatda saqlanadi.</div>
+      <form method="post" action="{{ url_for('setup') }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <label>Rahbar login<input name="username" value="admin" minlength="3" maxlength="40" autocomplete="username" required></label>
+        <label>Yangi parol<input name="password" type="password" minlength="8" autocomplete="new-password" required></label>
+        <label>Parolni qayta yozing<input name="password_confirm" type="password" minlength="8" autocomplete="new-password" required></label>
+        <button class="ok" type="submit">Rahbarni yaratish</button>
+      </form>
+    {% else %}
+      <h2>Mebel360° tizimiga kirish</h2>
+      <div class="auth-note">Rahbar, konstruktor, menejer, ishchi va shafyor o'z login-paroli bilan kiradi. 5 marta noto'g'ri urinishdan keyin kirish 15 daqiqaga bloklanadi.</div>
+      <form method="post" action="{{ url_for('login') }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <label>Login<input name="username" autocomplete="username" required autofocus></label>
+        <label>Parol<input name="password" type="password" autocomplete="current-password" required></label>
+        <button class="ok" type="submit">Tizimga kirish</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+"""
+
+
+CONSTRUCTOR_BODY = r"""
+<div class="panel hero">
+  <div class="hero-grid"><div><h1>Konstruktor boshqaruv markazi</h1><p>Detalni kiriting yoki fayldan yuklang. Dastur eng yaxshi kroy variantini tanlaydi, kromkani hisoblaydi va ishchiga xavfsiz topshiriq yuboradi.</p></div><div class="hero-actions no-print">{% if session.get('user_role')=='admin' %}<a class="btn" href="{{ url_for('download_backup') }}">Baza nusxasini yuklash</a>{% endif %}<span class="btn2 btn">Avto-zaxira: faol</span></div></div>
+</div>
+<div class="grid">
+  <div>
+    <div class="panel">
+      <h3 class="step-title"><span class="step-no">1</span>Buyurtma va list</h3><div class="section-note">Asosiy ma’lumotlar va PRO100 chizmasini biriktiring.</div>
+      <form method="post" action="{{ url_for('job_create') }}" id="jobForm" enctype="multipart/form-data"><input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <label>Buyurtma kodi<input name="order_code" required value="{{ draft.order_code }}" placeholder="AD-001"></label>
+        <label>Mijoz<input name="customer" value="{{ draft.customer }}" placeholder="Akmal aka"></label>
+        <label>Material / rang<input name="material" required value="{{ draft.material }}" placeholder="LMDEF oq 16 mm"></label>
+        <div class="row"><label>List uzunligi, mm<input type="number" name="sheet_length" required value="{{ draft.sheet_length }}"></label><label>List eni, mm<input type="number" name="sheet_width" required value="{{ draft.sheet_width }}"></label></div>
+        <div class="row"><label>Arraning izi, mm<input type="number" name="kerf" required value="{{ draft.kerf }}"></label><label>Chet kesimi, mm<input type="number" name="trim" required value="{{ draft.trim }}"></label></div>
+        <div class="opt-box"><label>Kroy hisoblash usuli<select name="optimization_mode"><option value="large" {{ 'selected' if draft.optimization_mode=='large' else '' }}>Chuqur hisob - 240 variantgacha</option><option value="full" {{ 'selected' if draft.optimization_mode=='full' else '' }}>Standart - 120 variantgacha</option><option value="fast" {{ 'selected' if draft.optimization_mode=='fast' else '' }}>Tezkor - 60 variantgacha</option></select></label><div class="variant-note">Tanlangan usul topshiriqda, ishchi oynasida va A4 PDFda yoziladi. Dastur tekshirilgan variantlar ichidan listi kam va katta qoldiq qoladigan taxlashni tanlaydi.</div></div>
+        <label>Ishchi<input name="worker_name" value="{{ draft.worker_name }}" placeholder="Kesuvchi ishchi"></label>
+        <label>PRO100 chizmasi — ixtiyoriy `.STO`<input type="file" name="sto_file" accept=".sto"></label><div class="muted">STO fayl kroy topshirig‘iga biriktiriladi va keyin yuklab olish mumkin.</div>
+        <input type="hidden" name="parts_json" id="partsJson">
+        <button class="ok" type="submit" onclick="return prepareSubmit()">Kroy qil va ishchiga yubor</button>
+      </form>
+    </div>
+    <div class="panel">
+      <h3 class="step-title"><span class="step-no">2</span>Fayldan detal yuklash</h3><div class="section-note">DBF, CSV yoki TXT faylidan detal ro‘yxatini bir bosishda oling.</div>
+      <div class="import-grid">
+        <form class="file-box" method="post" action="{{ url_for('dbf_import') }}" enctype="multipart/form-data"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><h4>2D-PLACE DBF</h4><input type="file" name="dbf" accept=".dbf" required><button type="submit" class="btn2">DBF yuklash</button></form>
+        <form class="file-box green" method="post" action="{{ url_for('table_import') }}" enctype="multipart/form-data"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><h4>CSV / TXT jadval</h4><input type="file" name="table_file" accept=".csv,.txt" required><button type="submit" class="ok">CSV/TXT yuklash</button></form>
+      </div><p class="muted">Jadval ustunlari: detal nomi, uzunlik, en, soni, aylantirish va kromka. O‘zbek, rus yoki inglizcha sarlavhalar qabul qilinadi.</p>
+    </div>
+  </div>
+  <div>
+    <div class="panel">
+      <h3 class="step-title"><span class="step-no">3</span>Detallar va kromka</h3><div class="section-note">O‘lcham 10–10000 mm, jami 2500 tagacha detal. Noto‘g‘ri qiymat serverda ham to‘xtatiladi.</div>
+      <div class="row"><label>Detal nomi<input id="pName" placeholder="Bokovina"></label><label>Soni<input id="pQty" type="number" min="1" max="999" value="1" oninput="renderEntryEdges()"></label></div>
+      <div class="row"><label>Uzunligi, mm<input id="pLength" type="number" min="10" max="10000" placeholder="2100" oninput="renderEntryEdges()"></label><label>Eni, mm<input id="pWidth" type="number" min="10" max="10000" placeholder="300" oninput="renderEntryEdges()"></label></div>
+      <div class="edge-help"><b>Kromkani chiziqdan belgilang:</b> uzunlik ostidagi 2 chiziq — uzun ikki tomon, en ostidagi 2 chiziq — kalta ikki tomon. Bosilgan qizil chiziq kromka bo'ladi.</div>
+      <div class="edge-pickers">
+        <div class="edge-picker"><div class="edge-picker-title"><span class="edge-dim" id="entryLengthDim">2100 mm</span><span class="edge-side-name">uzun tomonlar</span></div><div class="edge-lines"><button id="entryTop" class="edge-toggle" type="button" onclick="toggleEntryEdge('top')" title="Uzun tomon 1"><span class="edge-stroke"></span></button><button id="entryBottom" class="edge-toggle" type="button" onclick="toggleEntryEdge('bottom')" title="Uzun tomon 2"><span class="edge-stroke"></span></button></div></div>
+        <div class="edge-picker"><div class="edge-picker-title"><span class="edge-dim" id="entryWidthDim">300 mm</span><span class="edge-side-name">kalta tomonlar</span></div><div class="edge-lines"><button id="entryLeft" class="edge-toggle" type="button" onclick="toggleEntryEdge('left')" title="Kalta tomon 1"><span class="edge-stroke"></span></button><button id="entryRight" class="edge-toggle" type="button" onclick="toggleEntryEdge('right')" title="Kalta tomon 2"><span class="edge-stroke"></span></button></div></div>
+      </div>
+      <div class="meter-box"><div><b>Bu detal kromkasi ×1.1</b><br><small>Tanlangan chiziqlar, soni va 10% zaxira bilan</small></div><strong id="entryEdgeMeters">0.00 m</strong></div>
+      <div class="grain-box"><div><div class="grain-title">Gul / tekstura yo'nalishi</div><div class="grain-note" id="rotateExplain">Detalni 90° aylantirib joylash mumkin.</div></div><label class="grain-toggle"><input id="pRotate" type="checkbox" checked onchange="renderRotateStatus()"><span id="rotateStatus" class="grain-badge">Aylantirish mumkin</span></label></div>
+      <div class="actions"><button type="button" onclick="addPart()">Detal qo'shish</button><button type="button" class="light" onclick="addSample()">Namuna qo'shish</button><button type="button" class="danger" onclick="clearParts()">Tozalash</button></div>
+      <div class="tablewrap desktop"><table><thead><tr><th>#</th><th>Detal</th><th>Uzunlik</th><th>En</th><th>Soni</th><th>Gul yo'nalishi</th><th>Kromka</th><th>Kromka metri</th><th></th></tr></thead><tbody id="partsBody"></tbody></table></div>
+      <div class="part-cards" id="partCards"></div>
+      <p class="muted" id="partSummary"></p>
+      <div class="meter-total">Jami kromka ×1.1 (10% zaxira bilan): <span id="totalEdgeMeters">0.00 m</span></div>
+    </div>
+    <div class="panel">
+      <h3 class="step-title"><span class="step-no">4</span>Oldingi topshiriqlar</h3>
+      {% if jobs %}<div class="tablewrap"><table><thead><tr><th>Kod</th><th>Material</th><th>Ishchi</th><th>Holat</th><th></th></tr></thead><tbody>{% for j in jobs %}<tr><td>{{ j.order_code }}</td><td>{{ j.material }}</td><td>{{ j.worker_name }}</td><td><span class="badge">{{ j.status }}</span></td><td><a class="btn light" href="{{ url_for('job_view',job_id=j.id) }}">Ochish</a></td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty">Hozircha topshiriq yo'q</div>{% endif %}
+    </div>
+  </div>
+</div>
+<script>
+let parts={{ parts_json|safe }};
+let entryEdges={top:false,bottom:false,left:false,right:false};
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));}
+function edges(p){let a=[];if(p.edge_top)a.push('U1');if(p.edge_bottom)a.push('U2');if(p.edge_left)a.push('E1');if(p.edge_right)a.push('E2');return a.length?a.join(', '):"yo'q";}
+const EDGE_MULTIPLIER=1.1;
+function edgeMeters(p){const q=Math.max(1,Number(p.qty||1)),l=Math.max(0,Number(p.length||0)),w=Math.max(0,Number(p.width||0));const mm=(p.edge_top?l:0)+(p.edge_bottom?l:0)+(p.edge_left?w:0)+(p.edge_right?w:0);return mm*q/1000*EDGE_MULTIPLIER;}
+function totalEdgeMeters(){return parts.reduce((s,p)=>s+edgeMeters(p),0);}
+function meterText(v){return `${Number(v||0).toFixed(2)} m`;}
+function grainText(p){return p.rotate?'Aylantirish mumkin':"Aylantirib bo'lmaydi";}
+function rotateButton(index,p){return `<button type="button" class="rotate-action ${p.rotate?'':'locked'}" onclick="togglePartRotate(${index})">${grainText(p)}</button>`;}
+function edgeButton(index,key,active,title){return `<button class="edge-toggle ${active?'active':''}" type="button" onclick="togglePartEdge(${index},'${key}')" title="${title}" aria-pressed="${active?'true':'false'}"><span class="edge-stroke"></span></button>`;}
+function dimensionPicker(index,value,kind,p){
+ const isLength=kind==='length';
+ const key1=isLength?'top':'left',key2=isLength?'bottom':'right';
+ const active1=isLength?p.edge_top:p.edge_left,active2=isLength?p.edge_bottom:p.edge_right;
+ const title1=isLength?'Uzun tomon 1':'Kalta tomon 1',title2=isLength?'Uzun tomon 2':'Kalta tomon 2';
+ return `<div class="dim-cell"><div class="dim-value">${value} mm</div><div class="table-edge-lines">${edgeButton(index,key1,active1,title1)}${edgeButton(index,key2,active2,title2)}</div></div>`;
+}
+function cardPicker(index,p){return `<div class="edge-pickers"><div class="edge-picker"><div class="edge-picker-title"><span class="edge-dim">${p.length} mm</span><span class="edge-side-name">uzun tomonlar</span></div><div class="edge-lines">${edgeButton(index,'top',p.edge_top,'Uzun tomon 1')}${edgeButton(index,'bottom',p.edge_bottom,'Uzun tomon 2')}</div></div><div class="edge-picker"><div class="edge-picker-title"><span class="edge-dim">${p.width} mm</span><span class="edge-side-name">kalta tomonlar</span></div><div class="edge-lines">${edgeButton(index,'left',p.edge_left,'Kalta tomon 1')}${edgeButton(index,'right',p.edge_right,'Kalta tomon 2')}</div></div></div>`;}
+function renderParts(){
+ const body=document.getElementById('partsBody'),cards=document.getElementById('partCards');body.innerHTML='';cards.innerHTML='';let total=0;
+ parts.forEach((p,i)=>{total+=Number(p.qty||1);body.innerHTML+=`<tr><td>${i+1}</td><td>${esc(p.name)}</td><td>${dimensionPicker(i,p.length,'length',p)}</td><td>${dimensionPicker(i,p.width,'width',p)}</td><td>${p.qty}</td><td class="grain-cell">${rotateButton(i,p)}</td><td class="edge-list">${edges(p)}</td><td class="meter-cell">${meterText(edgeMeters(p))}</td><td><button class="danger" type="button" onclick="removePart(${i})">×</button></td></tr>`;cards.innerHTML+=`<div class="part-card"><b>${i+1}. ${esc(p.name)}</b><div>${p.qty} dona · <span class="meter-cell">${meterText(edgeMeters(p))} kromka</span></div><div style="margin-top:7px">${rotateButton(i,p)}</div>${cardPicker(i,p)}<div class="edge-list">Kromka: ${edges(p)}</div><button class="danger" type="button" onclick="removePart(${i})">O'chirish</button></div>`;});
+ document.getElementById('partSummary').textContent=`${parts.length} tur detal, jami ${total} dona`;
+ document.getElementById('totalEdgeMeters').textContent=meterText(totalEdgeMeters());
+}
+function toggleEntryEdge(key){entryEdges[key]=!entryEdges[key];renderEntryEdges();}
+function renderRotateStatus(){
+ const rot=document.getElementById('pRotate'),status=document.getElementById('rotateStatus'),note=document.getElementById('rotateExplain');if(!rot||!status||!note)return;
+ status.textContent=rot.checked?'Aylantirish mumkin':"Aylantirib bo'lmaydi";status.classList.toggle('locked',!rot.checked);
+ note.textContent=rot.checked?"Detalni 90° aylantirib joylash mumkin.":"Gul yo'nalishi saqlanadi, detal 90° aylantirilmaydi.";
+}
+function renderEntryEdges(){
+ const lenValue=Number(document.getElementById('pLength').value||0),widValue=Number(document.getElementById('pWidth').value||0),qtyValue=Math.max(1,Number(document.getElementById('pQty').value||1));
+ const len=document.getElementById('pLength').value||document.getElementById('pLength').placeholder||'Uzunlik';
+ const wid=document.getElementById('pWidth').value||document.getElementById('pWidth').placeholder||'En';
+ document.getElementById('entryLengthDim').textContent=`${len} mm`;document.getElementById('entryWidthDim').textContent=`${wid} mm`;
+ const ids={top:'entryTop',bottom:'entryBottom',left:'entryLeft',right:'entryRight'};
+ Object.keys(ids).forEach(k=>{const b=document.getElementById(ids[k]);b.classList.toggle('active',entryEdges[k]);b.setAttribute('aria-pressed',entryEdges[k]?'true':'false');});
+ document.getElementById('entryEdgeMeters').textContent=meterText(edgeMeters({length:lenValue,width:widValue,qty:qtyValue,edge_top:entryEdges.top,edge_bottom:entryEdges.bottom,edge_left:entryEdges.left,edge_right:entryEdges.right}));
+}
+function togglePartEdge(i,key){const p=parts[i];if(!p)return;const map={top:'edge_top',bottom:'edge_bottom',left:'edge_left',right:'edge_right'};p[map[key]]=!p[map[key]];renderParts();}
+function togglePartRotate(i){const p=parts[i];if(!p)return;p.rotate=!p.rotate;renderParts();}
+function addPart(){
+ const nameEl=document.getElementById('pName'),lenEl=document.getElementById('pLength'),widEl=document.getElementById('pWidth'),qtyEl=document.getElementById('pQty');
+ const rotEl=document.getElementById('pRotate');
+ let name=nameEl.value.trim(),length=Number(lenEl.value),width=Number(widEl.value),qty=Math.floor(Number(qtyEl.value||1));if(!name||length<10||length>10000||width<10||width>10000||qty<1||qty>999){alert("Detal nomini yozing. O'lcham 10–10000 mm, soni 1–999 oralig'ida bo'lsin.");return;}if(parts.length>=500||parts.reduce((s,p)=>s+Number(p.qty||1),0)+qty>2500){alert('Limit: 500 tur va jami 2500 ta detal.');return;}parts.push({uid:Math.random().toString(36).slice(2),name,length,width,qty,rotate:rotEl.checked,edge_left:entryEdges.left,edge_right:entryEdges.right,edge_top:entryEdges.top,edge_bottom:entryEdges.bottom});nameEl.value='';lenEl.value='';widEl.value='';qtyEl.value=1;entryEdges={top:false,bottom:false,left:false,right:false};renderEntryEdges();renderParts();}
+function addSample(){parts=[{uid:'a1',name:'800 bakavoy',length:2100,width:300,qty:2,rotate:false,edge_left:true,edge_right:false,edge_top:true,edge_bottom:true},{uid:'a2',name:'Polka',length:700,width:420,qty:5,rotate:true,edge_left:false,edge_right:false,edge_top:true,edge_bottom:false},{uid:'a3',name:'Niz',length:700,width:450,qty:2,rotate:true,edge_left:true,edge_right:true,edge_top:true,edge_bottom:false},{uid:'a4',name:'Planka',length:700,width:100,qty:4,rotate:true,edge_left:false,edge_right:false,edge_top:true,edge_bottom:false},{uid:'a5',name:'Fasad',length:716,width:397,qty:4,rotate:false,edge_left:true,edge_right:true,edge_top:true,edge_bottom:true}];renderParts();}
+function removePart(i){parts.splice(i,1);renderParts();}function clearParts(){if(confirm('Hamma detallar o\'chirilsinmi?')){parts=[];renderParts();}}
+function prepareSubmit(){const total=parts.reduce((s,p)=>s+Number(p.qty||1),0);if(!parts.length){alert('Kamida bitta detal kiriting');return false;}if(parts.length>500||total>2500){alert('Detal limiti oshgan: 500 tur / 2500 dona.');return false;}document.getElementById('partsJson').value=JSON.stringify(parts);return true;}renderRotateStatus();renderEntryEdges();renderParts();
+</script>
+"""
+
+
+JOB_BODY = r"""
+<div class="panel">
+  <div class="worker-header"><div><h2>{{ job.order_code }} — {{ job.material }}</h2><div class="muted">Mijoz: {{ job.customer or '-' }} · Ishchi: {{ job.worker_name or '-' }} · {{ job.created_at }}</div></div><span class="badge {{ 'ready' if snapshot.progress==100 else 'progress' }}">{{ snapshot.progress }}% · {{ snapshot.stage }}</span></div>
+  <div class="statusline"><span class="stat">{{ sheets|length }} ta list</span><span class="stat">{{ total_parts }} ta detal</span><span class="stat">Kromka ×1.1: {{ '%.2f'|format(edge_m) }} m</span><span class="stat">{{ opt_label }}</span><span class="stat">Holat: {{ job.status }}</span><span class="stat">Yetkazish: {{ job.delivery_status or 'Kutilmoqda' }}</span></div>
+  <div class="actions no-print">
+    {% if job.worker_link_active %}<a class="btn ok" href="{{ worker_url }}" target="_blank">Ishchi oynasi</a><button class="btn2" type="button" onclick="navigator.clipboard.writeText('{{ worker_url }}').then(()=>alert('Ishchi havolasi nusxalandi'))">Ishchi havolasini olish</button>{% if session.get('user_role') in ['admin','constructor','manager'] %}<form method="post" action="{{ url_for('worker_link_revoke',job_id=job.id) }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="danger" type="submit" onclick="return confirm('Ishchi havolasi bekor qilinsinmi?')">Bekor qilish</button></form>{% endif %}{% else %}<span class="badge revoked">Ishchi havolasi bekor qilingan</span>{% if session.get('user_role') in ['admin','constructor','manager'] %}<form method="post" action="{{ url_for('worker_link_regenerate',job_id=job.id) }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="ok" type="submit">Yangi havola</button></form>{% endif %}{% endif %}
+    <a class="btn" href="{{ customer_url }}" target="_blank">Mijoz kuzatuvi</a><button class="btn2" type="button" onclick="navigator.clipboard.writeText('{{ customer_url }}').then(()=>alert('Mijoz havolasi nusxalandi'))">Mijozga yuborish</button>
+    <a class="btn warn" href="{{ url_for('job_pdf',job_id=job.id) }}" target="_blank">A4 PDF</a>
+  </div>
+  <div class="split-grid" style="margin-top:12px">
+    <div class="notice-preview"><b>Avtomatik bildirishnoma faol:</b> ishchi “Kroy kesildi” yoki “Kromka tayyor”ni bossa, mijozning kuzatuv sahifasida shu zahoti yangi xabar va foiz paydo bo'ladi.</div>
+    <div class="copy-box"><input readonly value="{{ customer_url }}"><button type="button" onclick="navigator.clipboard.writeText('{{ customer_url }}').then(()=>alert('Nusxalandi'))">Nusxalash</button></div>
+  </div>
+  {% if attachments %}<div class="security-note"><b>Biriktirilgan chizma:</b>{% for a in attachments %}<div class="attachment"><div><div class="attachment-name">{{ a.original_name }}</div><div class="attachment-meta">{{ (a.size_bytes/1024)|round(1) }} KB · {{ a.created_at }}</div></div><a class="btn light" href="{{ url_for('attachment_download',attachment_id=a.id) }}">STO yuklash</a></div>{% endfor %}</div>{% endif %}
+</div>
+<div class="split-grid">
+  <div><div class="sheet-grid">{% for row,plan,svg in sheets %}<div class="sheet-card"><div class="sheet-head"><div><div class="sheet-title">List {{ plan.number }} · {{ plan.width }}×{{ plan.height }} mm</div><div class="muted">{{ plan.placements|length }} detal · Foydalanish {{ usage(plan) }}% · <span class="offcut-stat">{{ offcut(plan) }}</span></div></div><span class="badge {{ 'ready' if row.cut_done and row.edge_done else ('progress' if row.cut_done or row.edge_done else '') }}">{{ 'Tayyor' if row.cut_done and row.edge_done else ('Jarayonda' if row.cut_done or row.edge_done else 'Kutilmoqda') }}</span></div>{{ svg|safe }}<div class="legend"><b>O'lcham atrofidagi qizil chiziq = kromka.</b> Pushti maydon = qoldiq. GUL ↕ = aylantirilmaydi.</div></div>{% endfor %}</div></div>
+  <div>
+    <div class="panel"><h3>Mijozga ko'ringan yangiliklar</h3>{% if updates %}<div class="timeline">{% for u in updates %}<div class="timeline-item"><div class="timeline-title">{{ u.title }}</div><div class="timeline-time">{{ u.created_at }} · {{ u.progress }}%</div><div class="timeline-message">{{ u.message }}</div></div>{% endfor %}</div>{% else %}<div class="empty">Yangilik yo'q</div>{% endif %}</div>
+    {% if session.get('user_role') in ['admin','manager','constructor'] %}<div class="panel"><h3>Menejer xabari</h3><form method="post" action="{{ url_for('manager_customer_update',job_id=job.id) }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><label>Sarlavha<input name="title" placeholder="Masalan: Yig'ish boshlandi" required></label><label>Mijozga xabar<textarea name="message" placeholder="Qisqa va tushunarli xabar" required></textarea></label><label>Tayyorlik foizi<input name="progress" type="number" min="0" max="100" value="{{ snapshot.progress }}"></label><button class="ok" type="submit">Mijozga ko'rsatish</button></form></div>{% endif %}
+  </div>
+</div>
+"""
+
+
+WORKER_BODY = r"""
+<div class="panel no-print">
+  <div class="worker-header"><div><h2>{{ job.order_code }}</h2><div class="muted">{{ job.material }} · {{ job.worker_name or 'Ishchi' }} · {{ job.customer or '' }}</div></div><span class="badge {{ 'ready' if snapshot.progress>=80 else 'progress' }}">{{ snapshot.progress }}% · {{ snapshot.stage }}</span></div>
+  <div class="notice-preview" style="margin-top:10px"><b>Mijozga avtomatik xabar:</b> “Kroy kesildi” yoki “Kromka tayyor”ni belgilab saqlashingiz bilan buyurtmachining telefonidagi kuzatuv sahifasi yangilanadi.</div>
+  <div class="statusline"><span class="stat">List: {{ sheets|length }}</span><span class="stat">Detal: {{ total_parts }}</span><span class="stat">Jami kromka ×1.1: {{ '%.2f'|format(edge_m) }} m</span><span class="stat">Kroy usuli: {{ opt_label }}</span></div>
+  <div class="actions"><button class="btn ok" type="button" onclick="window.print()">Printerdan chiqarish</button><a class="btn warn" href="{{ url_for('worker_pdf',token=job.token) }}" target="_blank">A4 PDF — 2 list/bet</a></div>
+</div>
+<div class="sheet-grid">{% for row,plan,svg in sheets %}<div class="sheet-card"><div class="sheet-head"><div><div class="sheet-title">{{ job.order_code }} · List {{ plan.number }} · {{ plan.width }}×{{ plan.height }}</div><div class="muted">{{ plan.placements|length }} detal · {{ usage(plan) }}% · <span class="offcut-stat">{{ offcut(plan) }}</span></div></div><span class="badge {{ 'ready' if row.cut_done and row.edge_done else ('progress' if row.cut_done else '') }}">{{ 'Kroy va kromka tayyor' if row.cut_done and row.edge_done else ('Kroy kesildi' if row.cut_done else 'Yangi') }}</span></div>{{ svg|safe }}
+<div class="legend"><b>Qizil qisqa chiziq = kromka.</b> Pushti maydon = foydalanish mumkin bo'lgan qoldiq. GUL ↕ = aylantirilmaydi.</div>
+<form class="no-print" method="post" action="{{ url_for('worker_update',token=job.token,sheet_no=plan.number) }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><div class="checks"><label class="check"><input name="cut_done" type="checkbox" {{ 'checked disabled' if row.cut_done else '' }}>Kroy kesildi</label><label class="check"><input name="edge_done" type="checkbox" {{ 'checked disabled' if row.edge_done else '' }}>Kromka tayyor</label></div>{% if row.cut_done %}<input type="hidden" name="cut_done" value="1">{% endif %}{% if row.edge_done %}<input type="hidden" name="edge_done" value="1">{% endif %}<label>Izoh<textarea name="note" placeholder="Kamchilik yoki izoh">{{ row.note }}</textarea></label><button class="ok" type="submit">Saqlash va mijozga bildirish</button></form></div>{% endfor %}</div>
+"""
+
+
+DASHBOARD_BODY = r"""
+<div class="panel dashboard-hero"><h1>Mebel360° boshqaruv markazi</h1><p>Har bir xodim o'z bo'limida ishlaydi. Buyurtmadagi bajarilgan bosqichlar mijozga avtomatik ko'rinadi.</p></div>
+<div class="kpi-grid"><div class="kpi"><b>{{ stats.total }}</b><span>Jami buyurtma</span></div><div class="kpi"><b>{{ stats.process }}</b><span>Jarayonda</span></div><div class="kpi"><b>{{ stats.ready }}</b><span>Kroy va kromka tayyor</span></div><div class="kpi"><b>{{ stats.delivered }}</b><span>Yetkazilgan</span></div></div>
+<div class="role-grid">
+{% if role in ['admin','constructor'] %}<a class="role-card" href="{{ url_for('constructor') }}"><div class="role-icon">📐</div><h3>Konstruktor</h3><p>Detal, kroy, kromka, PRO100 fayli va ishchi topshirig'i.</p><div class="role-arrow">Bo'limga kirish →</div></a>{% endif %}
+{% if role in ['admin','manager'] %}<a class="role-card" href="{{ url_for('manager_dashboard') }}"><div class="role-icon">📋</div><h3>Menejer</h3><p>Buyurtmalar, tayyorlik foizi, mijoz havolasi va xabarlar.</p><div class="role-arrow">Bo'limga kirish →</div></a>{% endif %}
+{% if role in ['admin','manager','constructor','worker'] %}<a class="role-card" href="{{ url_for('worker_center') }}"><div class="role-icon">🛠️</div><h3>Ishchi</h3><p>Kroy va kromka holatini belgilash, A4 topshiriq va izohlar.</p><div class="role-arrow">Bo'limga kirish →</div></a>{% endif %}
+{% if role in ['admin','manager','driver'] %}<a class="role-card" href="{{ url_for('driver_dashboard') }}"><div class="role-icon">🚚</div><h3>Shafyor</h3><p>Yetkazishga tayyor, yo'lda va yetkazildi holatlari.</p><div class="role-arrow">Bo'limga kirish →</div></a>{% endif %}
+</div>
+<div class="panel"><h3>So'nggi buyurtmalar</h3>{% if jobs %}<div class="tablewrap"><table><thead><tr><th>Kod</th><th>Mijoz</th><th>Jarayon</th><th>Tayyorlik</th><th></th></tr></thead><tbody>{% for j in jobs %}<tr><td><b>{{ j.order_code }}</b></td><td>{{ j.customer or '-' }}</td><td>{{ j.stage }}</td><td><div class="progress-track"><div class="progress-fill" style="width:{{ j.progress }}%"></div></div><div class="progress-label">{{ j.progress }}%</div></td><td><a class="btn light" href="{{ url_for('job_view',job_id=j.id) }}">Ochish</a></td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty">Hozircha buyurtma yo'q</div>{% endif %}</div>
+"""
+
+MANAGER_BODY = r"""
+<div class="panel hero"><div class="hero-grid"><div><h1>Menejer boshqaruvi</h1><p>Mijoz buyurtmasi qayerga yetganini bitta oynada ko'ring va kuzatuv havolasini yuboring.</p></div><div class="hero-actions">{% if session.get('user_role') in ['admin','constructor'] %}<a class="btn" href="{{ url_for('constructor') }}">Yangi kroy</a>{% endif %}</div></div></div>
+<div class="kpi-grid"><div class="kpi"><b>{{ stats.total }}</b><span>Buyurtmalar</span></div><div class="kpi"><b>{{ stats.process }}</b><span>Jarayonda</span></div><div class="kpi"><b>{{ stats.ready }}</b><span>Tayyor</span></div><div class="kpi"><b>{{ stats.delivered }}</b><span>Yetkazilgan</span></div></div>
+<div class="panel"><h3>Buyurtmalar nazorati</h3>{% for j in jobs %}<div class="order-card"><div class="order-head"><div><div class="order-code">{{ j.order_code }}</div><div class="muted">{{ j.customer or 'Mijoz yozilmagan' }} · {{ j.material }}</div></div><span class="badge {{ 'ready' if j.progress==100 else 'progress' }}">{{ j.progress }}%</span></div><div class="progress-track" style="margin-top:10px"><div class="progress-fill" style="width:{{ j.progress }}%"></div></div><div class="progress-label">{{ j.stage }} · Yetkazish: {{ j.delivery_status }}</div><div class="actions"><a class="btn light" href="{{ url_for('job_view',job_id=j.id) }}">Buyurtmani ochish</a><a class="btn" target="_blank" href="{{ j.customer_url }}">Mijoz oynasi</a><button class="btn2" type="button" onclick="navigator.clipboard.writeText('{{ j.customer_url }}').then(()=>alert('Mijoz havolasi nusxalandi'))">Havolani nusxalash</button></div></div>{% else %}<div class="empty">Hozircha buyurtma yo'q</div>{% endfor %}</div>
+"""
+
+WORKER_CENTER_BODY = r"""
+<div class="panel hero"><div class="hero-grid"><div><h1>Ishchi topshiriqlari</h1><p>Ishchi maxfiy havolani ochadi, kroy va kromka tugaganini belgilaydi. Mijozga xabar avtomatik tushadi.</p></div></div></div>
+<div class="panel">{% for j in jobs %}<div class="order-card"><div class="order-head"><div><div class="order-code">{{ j.order_code }}</div><div class="muted">{{ j.worker_name or 'Ishchi belgilanmagan' }} · {{ j.material }} · {{ j.customer or '-' }}</div></div><span class="badge {{ 'ready' if j.progress>=80 else 'progress' }}">{{ j.progress }}%</span></div><div class="progress-track" style="margin-top:10px"><div class="progress-fill" style="width:{{ j.progress }}%"></div></div><div class="actions"><a class="btn ok" href="{{ j.worker_url }}" target="_blank">Topshiriqni ochish</a><button class="btn2" type="button" onclick="navigator.clipboard.writeText('{{ j.worker_url }}').then(()=>alert('Ishchi havolasi nusxalandi'))">Havolani olish</button><a class="btn light" href="{{ url_for('job_view',job_id=j.id) }}">Nazorat</a></div></div>{% else %}<div class="empty">Ishchi topshirig'i yo'q</div>{% endfor %}</div>
+"""
+
+DRIVER_BODY = r"""
+<div class="panel hero"><div class="hero-grid"><div><h1>Shafyor boshqaruvi</h1><p>Yetkazish holatini yangilang. “Yo'lda” yoki “Yetkazildi” bosilishi bilan mijozning telefonida xabar chiqadi.</p></div></div></div>
+<div class="panel">{% for j in jobs %}<div class="order-card"><div class="order-head"><div><div class="order-code">{{ j.order_code }}</div><div class="muted">{{ j.customer or '-' }} · {{ j.material }}</div></div><span class="delivery-status {{ 'road' if j.delivery_status=="Yo'lda" else ('done' if j.delivery_status=='Yetkazildi' else '') }}">{{ j.delivery_status }}</span></div><div class="progress-track" style="margin-top:10px"><div class="progress-fill" style="width:{{ j.progress }}%"></div></div><div class="progress-label">{{ j.progress }}% · {{ j.stage }}</div><form method="post" action="{{ url_for('driver_update',job_id=j.id) }}" style="margin-top:10px"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><label>Shafyor izohi<input name="note" value="{{ j.delivery_note or '' }}" placeholder="Masalan: 15:30 da yo'lga chiqildi"></label><div class="delivery-buttons">{% for st in delivery_statuses %}<button class="{{ 'ok' if st=='Yetkazildi' else ('warn' if st=="Yo'lda" else 'btn2') }}" type="submit" name="status" value="{{ st }}">{{ st }}</button>{% endfor %}</div></form></div>{% else %}<div class="empty">Buyurtma yo'q</div>{% endfor %}</div>
+"""
+
+CUSTOMER_BODY = r"""
+<div class="customer-shell">
+  <div class="customer-top"><div class="customer-code">BUYURTMA {{ job.order_code }}</div><div class="customer-title">{{ job.customer or 'Hurmatli mijoz' }}</div><div class="customer-stage">{{ snapshot.stage }}</div><div class="customer-progress"><div class="customer-progress-row"><span>Tayyorlik</span><span>{{ snapshot.progress }}%</span></div><div class="progress-track"><div class="progress-fill" style="width:{{ snapshot.progress }}%"></div></div></div><div class="stage-list">{% for st in stages %}<div class="stage-step {{ st.state }}">{{ st.name }}</div>{% endfor %}</div></div>
+  <div class="panel" style="margin-top:14px"><div class="statusline"><span class="stat">Material: {{ job.material }}</span><span class="stat">Holat: {{ job.status }}</span><span class="stat">Yetkazish: {{ job.delivery_status or 'Kutilmoqda' }}</span></div><div class="notice-preview"><b>Jonli kuzatuv:</b> ishchi bajarilgan bosqichni belgilashi bilan bu sahifa avtomatik yangilanadi.</div></div>
+  <div class="panel"><h3>Buyurtma yangiliklari</h3>{% if updates %}<div class="timeline">{% for u in updates %}<div class="timeline-item"><div class="timeline-title">{{ u.title }}</div><div class="timeline-time">{{ u.created_at }} · {{ u.progress }}%</div><div class="timeline-message">{{ u.message }}</div></div>{% endfor %}</div>{% else %}<div class="empty">Yangiliklar kutilmoqda</div>{% endif %}<div class="auto-note">Sahifa har 15 soniyada avtomatik yangilanadi.</div></div>
+</div><script>setTimeout(()=>location.reload(),15000);</script>
+"""
+
+USERS_BODY = r"""
+<div class="panel hero"><div class="hero-grid"><div><h1>Xodimlar va rollar</h1><p>Har bir xodimga alohida login bering. Parollar bazada shifrlangan holda saqlanadi.</p></div></div></div>
+<div class="user-grid"><div class="panel"><h3>Yangi xodim</h3><form method="post" action="{{ url_for('user_create') }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><label>Login<input name="username" minlength="3" maxlength="40" required></label><label>Parol<input name="password" type="password" minlength="8" required></label><label>Roli<select name="role">{% for key,label in role_labels.items() %}{% if key!='admin' %}<option value="{{ key }}">{{ label }}</option>{% endif %}{% endfor %}</select></label><button class="ok" type="submit">Xodimni yaratish</button></form></div><div class="panel"><h3>Foydalanuvchilar</h3><div class="tablewrap"><table><thead><tr><th>Login</th><th>Roli</th><th>Holati</th><th></th></tr></thead><tbody>{% for u in users_list %}<tr><td><b>{{ u.username }}</b></td><td>{{ role_labels.get(u.role,u.role) }}</td><td>{{ 'Faol' if u.is_active else "O'chirilgan" }}</td><td>{% if u.id != session.get('admin_user_id') %}<form method="post" action="{{ url_for('user_toggle',user_id=u.id) }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="{{ 'danger' if u.is_active else 'ok' }}" type="submit">{{ "O'chirish" if u.is_active else 'Faollashtirish' }}</button></form>{% endif %}</td></tr>{% endfor %}</tbody></table></div></div></div>
+"""
+
+
+
+def render_page(title: str, body_template: str, **context: Any) -> str:
+    context.setdefault("role_labels", ROLE_LABELS)
+    body = render_template_string(body_template, **context)
+    return render_template_string(BASE_TEMPLATE, title=title, body=body, role_labels=ROLE_LABELS)
+
+
+def current_draft() -> dict[str, Any]:
+    defaults = {"order_code": "AD-001", "customer": "", "material": "LMDEF oq 16 mm", "sheet_length": 2800, "sheet_width": 2070, "kerf": 4, "trim": 10, "worker_name": "", "optimization_mode": "large"}
+    saved = session.get("kroy_draft", {})
+    if isinstance(saved, dict):
+        defaults.update(saved)
+    defaults.setdefault("optimization_mode", "large")
+    return defaults
+
+
+def _client_ip() -> str:
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()[:80]
+    return (request.remote_addr or "unknown")[:80]
+
+
+def _admin_exists() -> bool:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT 1 FROM app_users WHERE role='admin' AND is_active=1 LIMIT 1"
+    ).fetchone()
+    conn.close()
     return bool(row)
 
 
-@app.route("/admin/setup", methods=["GET", "POST"])
-def admin_setup():
-    if _admin_is_configured():
-        return redirect(url_for("login"))
-    error = ""
-    if request.method == "POST":
-        user = (request.form.get("user") or "admin").strip()
-        password = request.form.get("password") or ""
-        confirm = request.form.get("confirm") or ""
-        if len(user) < 3:
-            error = "Login kamida 3 ta belgidan iborat bo‘lsin."
-        elif _weak_password(password):
-            error = "Parol kamida 8 belgi, kamida bitta harf va bitta raqamdan iborat bo‘lsin."
-        elif password != confirm:
-            error = "Ikki parol bir xil emas."
+def _audit(action: str, user_id: int | None = None, username: str | None = None) -> None:
+    try:
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO audit_log(user_id,username,action,ip,created_at) VALUES(?,?,?,?,?)",
+            (
+                user_id if user_id is not None else session.get("admin_user_id"),
+                username if username is not None else session.get("admin_username", ""),
+                action[:200],
+                _client_ip(),
+                now_iso(),
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except sqlite3.Error:
+        # Audit xatosi asosiy ishni to'xtatmasin.
+        pass
+
+
+def _block_seconds_left(ip: str) -> int:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT blocked_until FROM login_attempts WHERE ip=?", (ip,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return 0
+    return max(0, int(row["blocked_until"] or 0) - int(tashkent_now().timestamp()))
+
+
+def _record_failed_login(ip: str) -> bool:
+    now_ts = int(tashkent_now().timestamp())
+    conn = get_db()
+    row = conn.execute(
+        "SELECT attempts,blocked_until FROM login_attempts WHERE ip=?", (ip,)
+    ).fetchone()
+    attempts = int(row["attempts"] or 0) + 1 if row else 1
+    blocked_until = int(row["blocked_until"] or 0) if row else 0
+    just_blocked = False
+    if attempts >= MAX_LOGIN_ATTEMPTS:
+        attempts = 0
+        blocked_until = now_ts + LOGIN_BLOCK_SECONDS
+        just_blocked = True
+    conn.execute(
+        """INSERT INTO login_attempts(ip,attempts,blocked_until,updated_at)
+           VALUES(?,?,?,?)
+           ON CONFLICT(ip) DO UPDATE SET
+             attempts=excluded.attempts,
+             blocked_until=excluded.blocked_until,
+             updated_at=excluded.updated_at""",
+        (ip, attempts, blocked_until, now_iso()),
+    )
+    conn.commit()
+    conn.close()
+    return just_blocked
+
+
+def _clear_login_attempts(ip: str) -> None:
+    conn = get_db()
+    conn.execute("DELETE FROM login_attempts WHERE ip=?", (ip,))
+    conn.commit()
+    conn.close()
+
+
+def login_required(view):
+    @wraps(view)
+    def wrapped(*args: Any, **kwargs: Any):
+        if not _admin_exists():
+            return redirect(url_for("setup"))
+        if not session.get("admin_user_id"):
+            flash("Avval tizimga kiring", "bad")
+            return redirect(url_for("login"))
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def roles_required(*allowed_roles: str):
+    def decorator(view):
+        @wraps(view)
+        def wrapped(*args: Any, **kwargs: Any):
+            if not _admin_exists():
+                return redirect(url_for("setup"))
+            if not session.get("admin_user_id"):
+                flash("Avval tizimga kiring", "bad")
+                return redirect(url_for("login"))
+            role = session.get("user_role", "admin")
+            if role not in allowed_roles:
+                flash("Bu bo'limga kirish huquqingiz yo'q", "bad")
+                endpoint = ROLE_HOME_ENDPOINTS.get(role, "dashboard")
+                return redirect(url_for(endpoint))
+            return view(*args, **kwargs)
+        return wrapped
+    return decorator
+
+
+# Eski nom bilan yozilgan dekoratorlar ham ishlashda davom etadi.
+admin_login_required = login_required
+
+
+def _role_redirect(role: str) -> Response:
+    return redirect(url_for(ROLE_HOME_ENDPOINTS.get(role, "dashboard")))
+
+
+def _dashboard_rows(limit: int = 30) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM kroy_jobs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    result: list[dict[str, Any]] = []
+    stats = {"total": 0, "process": 0, "ready": 0, "delivered": 0}
+    for row in rows:
+        snap = _progress_snapshot(conn, row["id"])
+        item = dict(row)
+        item.update(snap)
+        item["customer_url"] = url_for("customer_view", token=row["customer_token"], _external=True)
+        item["worker_url"] = url_for("worker_view", token=row["token"], _external=True)
+        result.append(item)
+    all_rows = conn.execute("SELECT id,delivery_status FROM kroy_jobs").fetchall()
+    stats["total"] = len(all_rows)
+    for row in all_rows:
+        snap = _progress_snapshot(conn, row["id"])
+        if snap["delivery_status"] == "Yetkazildi":
+            stats["delivered"] += 1
+        elif snap["edges"] == snap["total"] and snap["total"]:
+            stats["ready"] += 1
         else:
-            c = get_db()
-            try:
-                c.execute(
-                    "INSERT INTO admin_akkauntlari(login,parol_hash,faol) VALUES(?,?,1)",
-                    (user, generate_password_hash(password)),
-                )
-                c.commit()
-            except sqlite3.IntegrityError:
-                c.rollback()
-                error = "Bu login avval ishlatilgan."
-            finally:
-                c.close()
-            if not error:
-                session.clear()
-                session["logged_in"] = True
-                session["user"] = user
-                log_action("admin_first_setup", f"user={user}")
-                return redirect(url_for("home"))
-    return render_template_string(ADMIN_SETUP_HTML, error=error)
-
-
-@app.route("/login", methods=["GET","POST"])
-def login():
-    if not _admin_is_configured():
-        return redirect(url_for("admin_setup"))
-    error=''
-    if request.method=='POST':
-        user=(request.form.get('user') or '').strip()
-        password=request.form.get('password') or ''
-        locked, wait_sec = _is_login_locked(user)
-        account = _admin_account(user)
-        if locked:
-            minutes = max(1, (wait_sec + 59) // 60)
-            error=f'Juda ko‘p xato urinish. Taxminan {minutes} daqiqadan so‘ng qayta urinib ko‘ring.'
-        elif account and int(account['faol'] or 0) == 1 and check_password_hash(account['parol_hash'], password):
-            _clear_login_attempts(user)
-            session.clear()
-            session['logged_in']=True
-            session['user']=account['login']
-            log_action('admin_login', f"user={account['login']}")
-            return redirect(url_for('home'))
-        else:
-            _register_failed_login(user)
-            log_action('admin_login_failed', f'user={user}')
-            error='Login yoki parol xato'
-    return render_template_string(LOGIN_HTML,error=error)
-
-
-@app.route("/logout")
-def logout():
-    user = session.get("user", "")
-    log_action("admin_logout", f"user={user}")
-    session.clear()
-    return redirect(url_for('login'))
+            stats["process"] += 1
+    conn.close()
+    return result, stats
 
 
 @app.route("/")
-def splash():
-    if session.get("logged_in"):
-        next_url = url_for("home")
-    elif session.get("staff_role") == "menejer":
-        next_url = url_for("manager_dashboard")
-    elif session.get("staff_role") == "konstruktor":
-        next_url = url_for("constructor_dashboard")
-    else:
-        next_url = url_for("login")
-    return render_template_string(SPLASH_HTML, next_url=next_url)
+def home() -> Response:
+    if not _admin_exists():
+        return redirect(url_for("setup"))
+    if not session.get("admin_user_id"):
+        return redirect(url_for("login"))
+    return _role_redirect(session.get("user_role", "admin"))
 
 
-@app.route("/dashboard")
-def home():
-    return render_template_string(HTML)
+@app.route("/setup", methods=["GET", "POST"])
+def setup() -> Response | str:
+    if _admin_exists():
+        return redirect(url_for("login"))
+    if request.method == "POST":
+        username = request.form.get("username", "admin").strip()
+        password = request.form.get("password", "")
+        password_confirm = request.form.get("password_confirm", "")
+        if len(username) < 3 or len(username) > 40 or any(ch.isspace() for ch in username):
+            flash("Login 3-40 belgi bo'lsin va bo'sh joy ishlatilmasin", "bad")
+            return redirect(url_for("setup"))
+        if len(password) < 8:
+            flash("Parol kamida 8 ta belgidan iborat bo'lsin", "bad")
+            return redirect(url_for("setup"))
+        if password != password_confirm:
+            flash("Ikki parol bir xil emas", "bad")
+            return redirect(url_for("setup"))
+        conn = get_db()
+        try:
+            cur = conn.execute(
+                """INSERT INTO app_users(username,password_hash,role,is_active,created_at)
+                   VALUES(?,?,'admin',1,?)""",
+                (username, generate_password_hash(password), now_iso()),
+            )
+            conn.commit()
+            user_id = int(cur.lastrowid)
+        except sqlite3.IntegrityError:
+            conn.close()
+            flash("Bu login allaqachon mavjud", "bad")
+            return redirect(url_for("setup"))
+        conn.close()
+        session.clear()
+        session.permanent = True
+        session["admin_user_id"] = user_id
+        session["admin_username"] = username
+        session["user_role"] = "admin"
+        _audit("Birinchi rahbar yaratildi", user_id=user_id, username=username)
+        create_database_backup()
+        flash("Rahbar xavfsiz yaratildi")
+        return redirect(url_for("dashboard"))
+    return render_page("Birinchi sozlash", AUTH_BODY, setup=True)
 
 
-# ---------- ISHCHILAR ----------
-@app.route("/api/ishchilar", methods=["GET"])
-def workers_get():
-    c = get_db()
-    rows = c.execute("SELECT * FROM ishchilar WHERE faol=1 ORDER BY ism,familiya").fetchall()
-    c.close()
-    return jsonify([dict(r) for r in rows])
+@app.route("/login", methods=["GET", "POST"])
+def login() -> Response | str:
+    if not _admin_exists():
+        return redirect(url_for("setup"))
+    if session.get("admin_user_id"):
+        return _role_redirect(session.get("user_role", "admin"))
+    if request.method == "POST":
+        ip = _client_ip()
+        seconds_left = _block_seconds_left(ip)
+        if seconds_left:
+            minutes = max(1, (seconds_left + 59) // 60)
+            flash(f"Ko'p noto'g'ri urinish bo'ldi. {minutes} daqiqadan keyin qayta urinib ko'ring.", "bad")
+            return redirect(url_for("login"))
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        conn = get_db()
+        user = conn.execute(
+            "SELECT id,username,password_hash,role FROM app_users WHERE username=? AND is_active=1",
+            (username,),
+        ).fetchone()
+        conn.close()
+        if not user or not check_password_hash(user["password_hash"], password):
+            just_blocked = _record_failed_login(ip)
+            _audit("Tizimga kirish muvaffaqiyatsiz", username=username)
+            flash("5 marta noto'g'ri kiritildi. Kirish 15 daqiqaga bloklandi." if just_blocked else "Login yoki parol noto'g'ri", "bad")
+            return redirect(url_for("login"))
+        _clear_login_attempts(ip)
+        session.clear()
+        session.permanent = True
+        session["admin_user_id"] = int(user["id"])
+        session["admin_username"] = user["username"]
+        session["user_role"] = user["role"]
+        _audit(f"{ROLE_LABELS.get(user['role'], user['role'])} tizimga kirdi")
+        flash(f"Xush kelibsiz, {ROLE_LABELS.get(user['role'], user['role'])}")
+        return _role_redirect(user["role"])
+    return render_page("Tizimga kirish", AUTH_BODY, setup=False)
 
 
-@app.route("/api/ishchilar", methods=["POST"])
-def workers_add():
-    d = jdata()
-    if not str(d.get("ism","")).strip():
-        return jsonify({"message":"Ism kiritilmagan"}),400
-    c = get_db()
-    c.execute("""INSERT INTO ishchilar
-    (ism,familiya,telefon,lavozim,ishga_kirgan_sana,staj_yil,kunlik_stavka,oylik_maosh,
-     sifat_ball,tezlik_ball,intizom_ball,izoh,pasport,jshshir,tugilgan_sana,yashash_manzil,
-     pasport_berilgan_sana,pasport_bergan,favqulodda_telefon)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
-        d.get("ism","").strip(),d.get("familiya","").strip(),d.get("telefon","").strip(),
-        d.get("lavozim","").strip(),d.get("ishga_kirgan_sana",""),
-        float(d.get("staj_yil") or 0),float(d.get("kunlik_stavka") or 0),
-        float(d.get("oylik_maosh") or 0),float(d.get("sifat_ball") or 5),
-        float(d.get("tezlik_ball") or 5),float(d.get("intizom_ball") or 5),
-        d.get("izoh","").strip(),d.get("pasport","").strip(),d.get("jshshir","").strip(),
-        d.get("tugilgan_sana",""),d.get("yashash_manzil","").strip(),
-        d.get("pasport_berilgan_sana",""),d.get("pasport_bergan","").strip(),
-        d.get("favqulodda_telefon","").strip()
-    ))
-    c.commit(); c.close()
-    return jsonify({"status":"ok"})
+@app.post("/logout")
+@login_required
+def logout() -> Response:
+    _audit("Tizimdan chiqildi")
+    session.clear()
+    flash("Tizimdan chiqdingiz")
+    return redirect(url_for("login"))
 
 
-@app.route("/api/ishchilar/<int:i>", methods=["DELETE"])
-def workers_delete(i):
-    c=get_db(); c.execute("UPDATE ishchilar SET faol=0 WHERE id=?",(i,)); c.commit(); c.close()
-    return jsonify({"status":"ok"})
+@app.get("/dashboard")
+@login_required
+def dashboard() -> str:
+    jobs, stats = _dashboard_rows(8)
+    return render_page("Boshqaruv markazi", DASHBOARD_BODY, jobs=jobs, stats=stats, role=session.get("user_role", "admin"))
 
 
-# ---------- KELDI KETDI ----------
-@app.route("/api/keldi-ketdi", methods=["GET"])
-def attendance_get():
-    c=get_db()
-    rows=c.execute("""SELECT k.*,i.ism,i.familiya FROM keldi_ketdi k
-    JOIN ishchilar i ON i.id=k.ishchi_id ORDER BY sana DESC,id DESC LIMIT 200""").fetchall()
-    c.close(); return jsonify([dict(r) for r in rows])
+@app.get("/manager")
+@roles_required("admin", "manager")
+def manager_dashboard() -> str:
+    jobs, stats = _dashboard_rows(100)
+    return render_page("Menejer", MANAGER_BODY, jobs=jobs, stats=stats)
 
 
-@app.route("/api/keldi-ketdi", methods=["POST"])
-def attendance_add():
-    d=jdata()
+@app.get("/workers")
+@roles_required("admin", "manager", "constructor", "worker")
+def worker_center() -> str:
+    jobs, _ = _dashboard_rows(100)
+    return render_page("Ishchi topshiriqlari", WORKER_CENTER_BODY, jobs=jobs)
+
+
+@app.get("/driver")
+@roles_required("admin", "manager", "driver")
+def driver_dashboard() -> str:
+    jobs, _ = _dashboard_rows(100)
+    return render_page("Shafyor", DRIVER_BODY, jobs=jobs, delivery_statuses=DELIVERY_STATUSES)
+
+
+@app.get("/users")
+@roles_required("admin")
+def users() -> str:
+    conn = get_db()
+    users_list = conn.execute("SELECT id,username,role,is_active,created_at FROM app_users ORDER BY id").fetchall()
+    conn.close()
+    return render_page("Xodimlar", USERS_BODY, users_list=users_list)
+
+
+@app.post("/users/create")
+@roles_required("admin")
+def user_create() -> Response:
+    username = request.form.get("username", "").strip()
+    password = request.form.get("password", "")
+    role = request.form.get("role", "worker")
+    if role not in ROLE_LABELS or role == "admin":
+        flash("Xodim roli noto'g'ri", "bad")
+        return redirect(url_for("users"))
+    if len(username) < 3 or len(username) > 40 or any(ch.isspace() for ch in username):
+        flash("Login 3-40 belgi bo'lsin", "bad")
+        return redirect(url_for("users"))
+    if len(password) < 8:
+        flash("Parol kamida 8 belgi bo'lsin", "bad")
+        return redirect(url_for("users"))
+    conn = get_db()
     try:
-        hours=calc_hours(d["keldi_vaqti"],d["ketdi_vaqti"])
-        c=get_db()
-        c.execute("""INSERT INTO keldi_ketdi(ishchi_id,sana,keldi_vaqti,ketdi_vaqti,ish_soatlari)
-        VALUES(?,?,?,?,?)""",(int(d["ishchi_id"]),d["sana"],d["keldi_vaqti"],d["ketdi_vaqti"],hours))
-        c.commit(); c.close()
-        return jsonify({"status":"ok"})
-    except Exception as e:
-        return jsonify({"message":str(e)}),400
+        conn.execute("INSERT INTO app_users(username,password_hash,role,is_active,created_at) VALUES(?,?,?,?,?)", (username, generate_password_hash(password), role, 1, now_iso()))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        flash("Bu login band", "bad")
+        return redirect(url_for("users"))
+    conn.close()
+    create_database_backup()
+    _audit(f"Xodim yaratildi: {username} / {role}")
+    flash(f"{ROLE_LABELS[role]} uchun login yaratildi")
+    return redirect(url_for("users"))
 
 
+@app.post("/users/<int:user_id>/toggle")
+@roles_required("admin")
+def user_toggle(user_id: int) -> Response:
+    if user_id == session.get("admin_user_id"):
+        flash("O'zingizni o'chira olmaysiz", "bad")
+        return redirect(url_for("users"))
+    conn = get_db()
+    row = conn.execute("SELECT username,is_active FROM app_users WHERE id=?", (user_id,)).fetchone()
+    if not row:
+        conn.close()
+        abort(404)
+    conn.execute("UPDATE app_users SET is_active=? WHERE id=?", (0 if row["is_active"] else 1, user_id))
+    conn.commit()
+    conn.close()
+    create_database_backup()
+    flash("Xodim holati yangilandi")
+    return redirect(url_for("users"))
 
-@app.route("/api/davomat/keldi", methods=["POST"])
-def attendance_clock_in():
-    d=jdata()
+
+@app.route("/constructor")
+@roles_required("admin", "constructor")
+def constructor() -> str:
+    draft = current_draft()
+    parts: list[dict[str, Any]] = []
+    conn = get_db()
+    import_token = session.get("kroy_import_token")
+    if import_token:
+        draft_row = conn.execute("SELECT parts_json FROM kroy_import_drafts WHERE token=?", (import_token,)).fetchone()
+        if draft_row:
+            try:
+                parts = json.loads(draft_row["parts_json"])
+            except json.JSONDecodeError:
+                parts = []
+        else:
+            session.pop("kroy_import_token", None)
+    jobs = conn.execute("SELECT * FROM kroy_jobs ORDER BY id DESC LIMIT 20").fetchall()
+    conn.close()
+    return render_page("Konstruktor Kroy", CONSTRUCTOR_BODY, draft=draft, parts_json=json.dumps(parts, ensure_ascii=False), jobs=jobs)
+
+
+@app.post("/constructor/dbf")
+@roles_required("admin", "constructor")
+def dbf_import() -> Response:
+    upload = request.files.get("dbf")
+    if not upload or not upload.filename:
+        flash("DBF fayl tanlanmadi", "bad")
+        return redirect(url_for("constructor"))
+    data = upload.read(MAX_IMPORT_BYTES + 1)
+    if len(data) > MAX_IMPORT_BYTES:
+        flash("DBF fayl 5 MBdan katta bo'lmasligi kerak", "bad")
+        return redirect(url_for("constructor"))
     try:
-        worker_id=int(d["ishchi_id"])
-        now=_tashkent_now()
-        sana=now.strftime("%Y-%m-%d")
-        vaqt=now.strftime("%H:%M")
-        c=get_db()
-        row=c.execute("""SELECT id FROM keldi_ketdi
-                         WHERE ishchi_id=? AND sana=? AND (ketdi_vaqti='' OR ketdi_vaqti IS NULL)
-                         ORDER BY id DESC LIMIT 1""",(worker_id,sana)).fetchone()
-        if row:
-            c.close()
-            return jsonify({"message":"Bu ishchi bugun allaqachon kelgan deb belgilangan."}),400
-        c.execute("""INSERT INTO keldi_ketdi(ishchi_id,sana,keldi_vaqti,ketdi_vaqti,ish_soatlari)
-                     VALUES(?,?,?,?,0)""",(worker_id,sana,vaqt,""))
-        c.commit(); c.close()
-        return jsonify({"status":"ok","sana":sana,"vaqt":vaqt})
-    except Exception as e:
-        return jsonify({"message":str(e)}),400
-
-
-@app.route("/api/davomat/ketdi", methods=["POST"])
-def attendance_clock_out():
-    d=jdata()
-    try:
-        worker_id=int(d["ishchi_id"])
-        now=_tashkent_now()
-        sana=now.strftime("%Y-%m-%d")
-        vaqt=now.strftime("%H:%M")
-        c=get_db()
-        row=c.execute("""SELECT * FROM keldi_ketdi
-                         WHERE ishchi_id=? AND sana=? AND (ketdi_vaqti='' OR ketdi_vaqti IS NULL)
-                         ORDER BY id DESC LIMIT 1""",(worker_id,sana)).fetchone()
-        if not row:
-            c.close()
-            return jsonify({"message":"Avval “Hozir keldi” tugmasini bosing."}),400
-        hours=calc_hours(row["keldi_vaqti"],vaqt)
-        c.execute("UPDATE keldi_ketdi SET ketdi_vaqti=?, ish_soatlari=? WHERE id=?",
-                  (vaqt,hours,row["id"]))
-        c.commit(); c.close()
-        return jsonify({"status":"ok","sana":sana,"vaqt":vaqt,"ish_soatlari":hours})
-    except Exception as e:
-        return jsonify({"message":str(e)}),400
-
-
-# ---------- ISH NATIJALARI ----------
-@app.route("/api/ish-turlari")
-def work_types_get():
-    c=get_db(); rows=c.execute("SELECT * FROM ish_turlari WHERE faol=1 ORDER BY kategoriya,nomi").fetchall()
-    c.close(); return jsonify([dict(r) for r in rows])
-
-
-@app.route("/api/natijalar", methods=["GET"])
-def results_get():
-    c=get_db()
-    rows=c.execute("""SELECT n.*,i.ism,i.familiya,t.nomi ish_turi,t.birlik
-    FROM ish_natijalari n JOIN ishchilar i ON i.id=n.ishchi_id
-    JOIN ish_turlari t ON t.id=n.ish_turi_id
-    ORDER BY sana DESC,n.id DESC LIMIT 250""").fetchall()
-    c.close(); return jsonify([dict(r) for r in rows])
-
-
-@app.route("/api/natijalar", methods=["POST"])
-def results_add():
-    d=jdata()
-    try:
-        qty=float(d.get("miqdor") or 0); price=float(d.get("birlik_narxi") or 0)
-        c=get_db()
-        c.execute("""INSERT INTO ish_natijalari
-        (ishchi_id,ish_turi_id,sana,miqdor,birlik_narxi,jami_haq,buyurtma_kodi,izoh)
-        VALUES(?,?,?,?,?,?,?,?)""",(int(d["ishchi_id"]),int(d["ish_turi_id"]),d["sana"],
-        qty,price,round(qty*price,2),d.get("buyurtma_kodi",""),d.get("izoh","")))
-        c.commit(); c.close()
-        return jsonify({"status":"ok"})
-    except Exception as e:
-        return jsonify({"message":str(e)}),400
-
-
-# ---------- TOLOV VA JARIMA ----------
-@app.route("/api/tolovlar", methods=["GET","POST"])
-def payments():
-    if request.method=="POST":
-        d=jdata(); c=get_db()
-        c.execute("INSERT INTO tolovlar(ishchi_id,sana,miqdor,turi,tavsifi) VALUES(?,?,?,?,?)",
-                  (int(d["ishchi_id"]),d["sana"],float(d.get("miqdor") or 0),d.get("turi","Avans"),d.get("tavsifi","")))
-        c.commit(); c.close(); return jsonify({"status":"ok"})
-    c=get_db(); rows=c.execute("""SELECT t.*,i.ism,i.familiya FROM tolovlar t
-    JOIN ishchilar i ON i.id=t.ishchi_id ORDER BY sana DESC,t.id DESC LIMIT 200""").fetchall()
-    c.close(); return jsonify([dict(r) for r in rows])
-
-
-@app.route("/api/jarimalar", methods=["GET","POST"])
-def penalties():
-    if request.method=="POST":
-        d=jdata(); c=get_db()
-        c.execute("INSERT INTO jarimalar(ishchi_id,sana,miqdor,sababi) VALUES(?,?,?,?)",
-                  (int(d["ishchi_id"]),d["sana"],float(d.get("miqdor") or 0),d.get("sababi","")))
-        c.commit(); c.close(); return jsonify({"status":"ok"})
-    c=get_db(); rows=c.execute("""SELECT j.*,i.ism,i.familiya FROM jarimalar j
-    JOIN ishchilar i ON i.id=j.ishchi_id ORDER BY sana DESC,j.id DESC LIMIT 200""").fetchall()
-    c.close(); return jsonify([dict(r) for r in rows])
-
-
-# ---------- BUYURTMALAR ----------
-STAGES=["Buyurtma qabul qilindi","Razmer olindi","Chizma tayyorlanmoqda","Mijoz tasdiqlashi kutilmoqda","Material tayyorlanmoqda","Kesish","Kromka","Teshish","Frezalash","Lazer","Bo‘yash","Sayqalash","Yig‘ish","Sehda tekshirish","Qadoqlash","Yetkazishga tayyor","Haydovchiga topshirildi","Yetkazib berildi","Buyurtma yopildi"]
-
-
-# ---------- MIJOZGA AVTOMATIK JARAYON XABARLARI ----------
-def _stage_key(value):
-    """Bosqich/ish nomini solishtirish uchun bir xil ko‘rinishga keltiradi."""
-    value = (value or "").strip().lower()
-    replacements = {
-        "’": "'", "‘": "'", "ʻ": "'", "ʼ": "'", "`": "'",
-        "o‘": "o", "g‘": "g", "sh": "sh", "ch": "ch",
-    }
-    for old, new in replacements.items():
-        value = value.replace(old, new)
-    return re.sub(r"[^a-z0-9а-яё]+", " ", value).strip()
-
-
-def _stage_aliases(work_name):
-    key = _stage_key(work_name)
-    rules = [
-        ("Razmer olindi", ("razmer", "olcham olish", "o lcham olish", "zamer")),
-        ("Chizma tayyorlanmoqda", ("chizma", "dizayn", "pro100", "konstruktor")),
-        ("Kesish", ("kesish", "kroy", "raspil", "list kesish")),
-        ("Kromka", ("kromka", "kromka urish", "edge band")),
-        ("Teshish", ("teshish", "sverlo", "parmalash")),
-        ("Frezalash", ("frezalash", "freza", "cnc", "rover")),
-        ("Lazer", ("lazer", "laser")),
-        ("Bo‘yash", ("boyash", "bo yash", "kraska", "paint")),
-        ("Sayqalash", ("sayqalash", "shlifovka", "silliqlash")),
-        ("Yig‘ish", ("yigish", "yig ish", "sborka", "montaj")),
-        ("Sehda tekshirish", ("tekshirish", "nazorat", "sifat nazorati")),
-        ("Qadoqlash", ("qadoqlash", "upakovka", "qadoq")),
-        ("Yetkazishga tayyor", ("yetkazishga tayyor", "dostavkaga tayyor")),
-        ("Haydovchiga topshirildi", ("haydovchiga", "shofyor", "shofyorga topshir")),
-        ("Yetkazib berildi", ("yetkazildi", "yetkazib berish", "dostavka")),
-    ]
-    for stage, words in rules:
-        if any(_stage_key(word) in key for word in words):
-            return stage
-    return (work_name or "Ish").strip()
-
-
-def _find_order_stage(conn, order_id, work_name):
-    rows = conn.execute(
-        "SELECT * FROM buyurtma_bosqichlari WHERE buyurtma_id=? ORDER BY id",
-        (order_id,),
-    ).fetchall()
-    if not rows:
-        return None
-    wanted = _stage_aliases(work_name)
-    wanted_key = _stage_key(wanted)
-    work_key = _stage_key(work_name)
-    for row in rows:
-        if _stage_key(row["bosqich"]) == wanted_key:
-            return row
-    for row in rows:
-        stage_key = _stage_key(row["bosqich"])
-        if stage_key and (stage_key in work_key or work_key in stage_key):
-            return row
-    return None
-
-
-def _customer_progress_message(conn, order, stage_name, worker_name, now_text, worker_id=None, note=""):
-    """Mijoz kuzatuv sahifasiga yangilik yozadi va tarixni saqlaydi."""
-    stage_name = (stage_name or "Ish").strip()
-    worker_name = (worker_name or "Ishchi").strip()
-    message = f"{order['kod']} buyurtmasida {stage_name} ishlari yakunlandi."
-    details = note.strip() if note else f"Bajardi: {worker_name}. Vaqt: {now_text}."
-    # Xuddi shu bosqich bo‘yicha takroriy xabarni ketma-ket kiritmaslik.
-    duplicate = conn.execute(
-        """SELECT id FROM tizim_xabarlari
-           WHERE buyurtma_id=? AND mavzu=? AND matn=? ORDER BY id DESC LIMIT 1""",
-        (order["id"], f"✅ {stage_name} tugadi", message),
-    ).fetchone()
-    if not duplicate:
-        conn.execute(
-            """INSERT INTO tizim_xabarlari
-               (foydalanuvchi_turi,foydalanuvchi_id,buyurtma_id,mavzu,matn,kanal,oqildi,created_at)
-               VALUES('Mijoz',NULL,?,?,?,?,0,?)""",
-            (order["id"], f"✅ {stage_name} tugadi", message, "Sayt", now_text),
-        )
+        parts = parse_dbf(data)
+    except ValueError as exc:
+        flash(str(exc), "bad")
+        return redirect(url_for("constructor"))
+    import_token = secrets.token_urlsafe(18)
+    conn = get_db()
     conn.execute(
-        """INSERT INTO buyurtma_bosqich_hodisalari
-           (buyurtma_id,bosqich,boshlandi,tugadi,ishchi_id,izoh,created_at)
-           VALUES(?,?,?,?,?,?,?)""",
-        (order["id"], stage_name, "", now_text, worker_id, details, now_text),
+        "INSERT INTO kroy_import_drafts(token,source_name,parts_json,created_at) VALUES(?,?,?,?)",
+        (import_token, upload.filename[:200], json.dumps([asdict(p) for p in parts], ensure_ascii=False), now_iso()),
     )
-    return message
+    conn.commit()
+    conn.close()
+    session["kroy_import_token"] = import_token
+    draft = current_draft()
+    draft["order_code"] = Path(upload.filename).stem[:50]
+    session["kroy_draft"] = draft
+    create_database_backup()
+    _audit(f"DBFdan {len(parts)} tur detal yuklandi")
+    flash(f"DBFdan {len(parts)} tur detal yuklandi")
+    return redirect(url_for("constructor"))
 
 
-def _sync_finished_work_to_customer(conn, task, worker, now_text):
-    """Ishchi 'Ishni tugatdim' deganda buyurtma bosqichi va mijoz xabarini yangilaydi."""
-    order_code = (task["buyurtma_kodi"] or "").strip()
-    if not order_code:
-        return None
-    order = conn.execute(
-        "SELECT * FROM buyurtmalar WHERE lower(trim(kod))=lower(trim(?)) LIMIT 1",
-        (order_code,),
-    ).fetchone()
-    if not order:
-        return None
-    stage = _find_order_stage(conn, order["id"], task["ish_turi"])
-    stage_name = stage["bosqich"] if stage else _stage_aliases(task["ish_turi"])
-    if stage:
-        conn.execute(
-            """UPDATE buyurtma_bosqichlari
-               SET bajarildi=1,
-                   boshlanish_vaqti=CASE WHEN COALESCE(boshlanish_vaqti,'')='' THEN ? ELSE boshlanish_vaqti END,
-                   tugash_vaqti=?,ishchi=?,izoh=?
-               WHERE id=?""",
-            (task["boshlandi_vaqt"] or now_text, now_text,
-             f"{worker['ism']} {worker['familiya'] or ''}".strip(),
-             f"Ishchi kabinetidan avtomatik yakunlandi: {task['ish_turi']}", stage["id"]),
+@app.post("/constructor/table-import")
+@roles_required("admin", "constructor")
+def table_import() -> Response:
+    upload = request.files.get("table_file")
+    if not upload or not upload.filename:
+        flash("CSV yoki TXT fayl tanlanmadi", "bad")
+        return redirect(url_for("constructor"))
+    suffix = Path(upload.filename).suffix.lower()
+    if suffix not in {".csv", ".txt"}:
+        flash("Faqat CSV yoki TXT fayl yuklang", "bad")
+        return redirect(url_for("constructor"))
+    data = upload.read(MAX_IMPORT_BYTES + 1)
+    if len(data) > MAX_IMPORT_BYTES:
+        flash("CSV/TXT fayl 5 MBdan katta bo'lmasligi kerak", "bad")
+        return redirect(url_for("constructor"))
+    try:
+        parts = parse_table_parts(data)
+    except ValueError as exc:
+        flash(str(exc), "bad")
+        return redirect(url_for("constructor"))
+    import_token = secrets.token_urlsafe(18)
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO kroy_import_drafts(token,source_name,parts_json,created_at) VALUES(?,?,?,?)",
+        (import_token, upload.filename[:200], json.dumps([asdict(p) for p in parts], ensure_ascii=False), now_iso()),
+    )
+    conn.commit()
+    conn.close()
+    session["kroy_import_token"] = import_token
+    draft = current_draft()
+    draft["order_code"] = Path(upload.filename).stem[:50]
+    session["kroy_draft"] = draft
+    create_database_backup()
+    _audit(f"CSV/TXTdan {len(parts)} tur detal yuklandi")
+    flash(f"CSV/TXTdan {len(parts)} tur detal yuklandi")
+    return redirect(url_for("constructor"))
+
+
+@app.post("/jobs")
+@roles_required("admin", "constructor")
+def job_create() -> Response:
+    try:
+        parts_data = json.loads(request.form.get("parts_json", "[]"))
+        if not isinstance(parts_data, list):
+            raise ValueError("Detallar ro'yxati noto'g'ri")
+        parts = validate_parts([
+            Part(
+                uid=str(p.get("uid") or secrets.token_hex(8)),
+                name=str(p.get("name", "")),
+                length=int(p.get("length", 0)),
+                width=int(p.get("width", 0)),
+                qty=int(p.get("qty", 1)),
+                rotate=_as_bool(p.get("rotate", True), True),
+                edge_left=_as_bool(p.get("edge_left")),
+                edge_right=_as_bool(p.get("edge_right")),
+                edge_top=_as_bool(p.get("edge_top")),
+                edge_bottom=_as_bool(p.get("edge_bottom")),
+            )
+            for p in parts_data
+            if isinstance(p, dict)
+        ])
+        meta = {
+            "order_code": request.form.get("order_code", "").strip()[:60],
+            "customer": request.form.get("customer", "").strip()[:100],
+            "material": request.form.get("material", "").strip()[:100],
+            "sheet_length": int(request.form.get("sheet_length", 0)),
+            "sheet_width": int(request.form.get("sheet_width", 0)),
+            "kerf": int(request.form.get("kerf", 0)),
+            "trim": int(request.form.get("trim", 0)),
+            "worker_name": request.form.get("worker_name", "").strip()[:100],
+            "optimization_mode": request.form.get("optimization_mode", "large") if request.form.get("optimization_mode", "large") in {"large", "full", "fast"} else "large",
+        }
+        if not meta["order_code"] or not meta["material"]:
+            raise ValueError("Buyurtma kodi va materialni yozing")
+        if not (300 <= meta["sheet_length"] <= 10000 and 300 <= meta["sheet_width"] <= 10000):
+            raise ValueError("List o'lchami 300-10000 mm oralig'ida bo'lsin")
+        if not (0 <= meta["kerf"] <= 30):
+            raise ValueError("Arraning izi 0-30 mm oralig'ida bo'lsin")
+        if not (0 <= meta["trim"] <= 300):
+            raise ValueError("Chet kesimi 0-300 mm oralig'ida bo'lsin")
+        if meta["sheet_length"] - 2 * meta["trim"] < MIN_PART_MM or meta["sheet_width"] - 2 * meta["trim"] < MIN_PART_MM:
+            raise ValueError("Chet kesimidan keyin listning ishlatiladigan maydoni qolmadi")
+
+        sto_upload = request.files.get("sto_file")
+        sto_data: bytes | None = None
+        sto_name = ""
+        if sto_upload and sto_upload.filename:
+            if Path(sto_upload.filename).suffix.lower() != ".sto":
+                raise ValueError("PRO100 chizmasi faqat .STO formatida bo'lsin")
+            sto_data = sto_upload.read(MAX_STO_BYTES + 1)
+            if len(sto_data) > MAX_STO_BYTES:
+                raise ValueError("STO fayl 20 MBdan katta bo'lmasligi kerak")
+            if not sto_data:
+                raise ValueError("STO fayl bo'sh")
+            sto_name = sto_upload.filename
+
+        plans, tested_variants, best_variant = pack_parts(
+            parts, meta["sheet_length"], meta["sheet_width"], meta["kerf"], meta["trim"], meta["optimization_mode"]
         )
-    worker_name = f"{worker['ism']} {worker['familiya'] or ''}".strip()
-    message = _customer_progress_message(
-        conn, order, stage_name, worker_name, now_text,
-        worker_id=worker["id"],
-        note=f"{worker_name} “{task['ish_turi']}” topshirig‘ini tugatdi.",
+        if not plans:
+            raise ValueError("Kroy listi hosil bo'lmadi")
+        meta["tested_variants"] = tested_variants
+        meta["best_variant"] = best_variant
+        job_id, _ = save_job(meta, parts, plans)
+        if sto_data is not None:
+            save_sto_attachment(job_id, sto_name, sto_data)
+        create_database_backup()
+        _audit(f"Kroy yaratildi: {meta['order_code']} ({len(plans)} list)")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError, sqlite3.Error) as exc:
+        flash(f"Xato: {exc}", "bad")
+        return redirect(url_for("constructor"))
+    import_token = session.pop("kroy_import_token", None)
+    if import_token:
+        conn = get_db()
+        conn.execute("DELETE FROM kroy_import_drafts WHERE token=?", (import_token,))
+        conn.commit()
+        conn.close()
+    session["kroy_draft"] = meta
+    flash(f"Kroy tayyor: {len(plans)} ta list. {tested_variants} ta variant tekshirildi.")
+    return redirect(url_for("job_view", job_id=job_id))
+
+@app.get("/jobs/<int:job_id>")
+@roles_required("admin", "constructor", "manager", "worker", "driver")
+def job_view(job_id: int) -> str:
+    job, parts, sheets_raw = load_job(job_id=job_id)
+    worker_url = url_for("worker_view", token=job["token"], _external=True) if job["worker_link_active"] else ""
+    sheets = [(row, plan, svg_for_plan(plan)) for row, plan in sheets_raw]
+    total_parts = sum(p["qty"] for p in parts)
+    conn = get_db()
+    attachments = conn.execute("SELECT * FROM kroy_attachments WHERE job_id=? ORDER BY id", (job_id,)).fetchall()
+    updates = conn.execute("SELECT * FROM customer_updates WHERE job_id=? ORDER BY id DESC", (job_id,)).fetchall()
+    snapshot = _progress_snapshot(conn, job_id)
+    conn.close()
+    customer_url = url_for("customer_view", token=job["customer_token"], _external=True)
+    return render_page(
+        f"Kroy {job['order_code']}", JOB_BODY, job=job, sheets=sheets, total_parts=total_parts,
+        edge_m=parts_edge_m(parts), worker_url=worker_url, customer_url=customer_url,
+        usage=sheet_usage, offcut=offcut_text, snapshot=snapshot, updates=updates,
+        opt_label=optimization_label(job["optimization_mode"]), attachments=attachments,
+    )
+
+
+@app.post("/jobs/<int:job_id>/worker-link/revoke")
+@roles_required("admin", "constructor", "manager")
+def worker_link_revoke(job_id: int) -> Response:
+    job, _, _ = load_job(job_id=job_id)
+    conn = get_db()
+    conn.execute("UPDATE kroy_jobs SET worker_link_active=0 WHERE id=?", (job_id,))
+    conn.commit()
+    conn.close()
+    create_database_backup()
+    _audit(f"Ishchi havolasi bekor qilindi: {job['order_code']}")
+    flash("Eski ishchi havolasi bekor qilindi")
+    return redirect(url_for("job_view", job_id=job_id))
+
+
+@app.post("/jobs/<int:job_id>/worker-link/regenerate")
+@roles_required("admin", "constructor", "manager")
+def worker_link_regenerate(job_id: int) -> Response:
+    job, _, _ = load_job(job_id=job_id)
+    new_token = secrets.token_urlsafe(24)
+    conn = get_db()
+    conn.execute(
+        "UPDATE kroy_jobs SET token=?,worker_link_active=1,worker_token_created_at=?,sent_at=? WHERE id=?",
+        (new_token, now_iso(), now_iso(), job_id),
+    )
+    conn.commit()
+    conn.close()
+    create_database_backup()
+    _audit(f"Yangi ishchi havolasi yaratildi: {job['order_code']}")
+    flash("Yangi maxfiy ishchi havolasi yaratildi")
+    return redirect(url_for("job_view", job_id=job_id))
+
+
+@app.get("/attachments/<int:attachment_id>")
+@roles_required("admin", "constructor", "manager")
+def attachment_download(attachment_id: int) -> Response:
+    conn = get_db()
+    row = conn.execute("SELECT * FROM kroy_attachments WHERE id=?", (attachment_id,)).fetchone()
+    conn.close()
+    if not row:
+        abort(404)
+    path = UPLOAD_DIR / row["stored_name"]
+    if not path.exists():
+        abort(404, description="Biriktirilgan fayl diskda topilmadi")
+    return send_file(path, as_attachment=True, download_name=row["original_name"], mimetype="application/octet-stream")
+
+
+@app.get("/admin/backup.db")
+@roles_required("admin")
+def download_backup() -> Response:
+    backup = create_database_backup()
+    if not backup or not backup.exists():
+        abort(500, description="Baza nusxasini yaratib bo'lmadi")
+    _audit("Baza zaxira nusxasi yuklandi")
+    return send_file(backup, as_attachment=True, download_name=backup.name, mimetype="application/x-sqlite3")
+
+
+@app.get("/worker/<token>")
+def worker_view(token: str) -> str:
+    job, parts, sheets_raw = load_job(token=token)
+    sheets = [(row, plan, svg_for_plan(plan)) for row, plan in sheets_raw]
+    total_parts = sum(p["qty"] for p in parts)
+    conn = get_db()
+    snapshot = _progress_snapshot(conn, job["id"])
+    conn.close()
+    return render_page(
+        f"Ishchi - {job['order_code']}", WORKER_BODY, job=job, sheets=sheets, total_parts=total_parts,
+        edge_m=parts_edge_m(parts), usage=sheet_usage, offcut=offcut_text, snapshot=snapshot,
+        opt_label=optimization_label(job["optimization_mode"]),
+    )
+
+
+@app.post("/worker/<token>/sheet/<int:sheet_no>")
+def worker_update(token: str, sheet_no: int) -> Response:
+    job, _, _ = load_job(token=token)
+    requested_cut = 1 if request.form.get("cut_done") else 0
+    requested_edge = 1 if request.form.get("edge_done") else 0
+    note = request.form.get("note", "").strip()[:500]
+    conn = get_db()
+    old = conn.execute("SELECT cut_done,edge_done FROM kroy_sheets WHERE job_id=? AND sheet_no=?", (job["id"], sheet_no)).fetchone()
+    if not old:
+        conn.close()
+        abort(404)
+    # Bajarilgan ish ortga qaytmaydi: tasodifiy bosish mijozdagi xabarni buzmaydi.
+    cut_done = max(int(old["cut_done"] or 0), requested_cut)
+    edge_done = max(int(old["edge_done"] or 0), requested_edge)
+    if edge_done:
+        cut_done = 1
+    conn.execute(
+        "UPDATE kroy_sheets SET cut_done=?,edge_done=?,note=? WHERE job_id=? AND sheet_no=?",
+        (cut_done, edge_done, note, job["id"], sheet_no),
     )
     stats = conn.execute(
-        """SELECT COUNT(*) jami,
-                  SUM(CASE WHEN bajarildi=1 THEN 1 ELSE 0 END) tayyor
-           FROM buyurtma_bosqichlari WHERE buyurtma_id=?""",
-        (order["id"],),
+        "SELECT COUNT(*) total,COALESCE(SUM(cut_done),0) cuts,COALESCE(SUM(edge_done),0) edges FROM kroy_sheets WHERE job_id=?",
+        (job["id"],),
     ).fetchone()
-    all_done = int(stats["jami"] or 0) > 0 and int(stats["jami"] or 0) == int(stats["tayyor"] or 0)
-    conn.execute(
-        "UPDATE buyurtmalar SET holat=? WHERE id=?",
-        ("Tayyor" if all_done else "Jarayonda", order["id"]),
-    )
-    return message
-
-@app.route("/api/buyurtmalar", methods=["GET","POST"])
-def orders():
-    if request.method=="POST":
-        d=jdata(); c=get_db()
-        try:
-            cur=c.execute("""INSERT INTO buyurtmalar(
-            kod,mijoz,telefon,manzil,mahsulot,umumiy_narx,oldindan_tolov,
-            boshlanish_sana,tugash_sana,taxminiy_sana,holat,izoh,tracking_token,
-            kechikish_foiz,maks_chegirma_foiz,keshbek_foiz,keshbek_summa,
-            kafolat_boshlanish,kafolat_tugash,lokatsiya,moljal,qavat,lift,
-            katta_mashina,masul_xodim,pasport_id,olcham,soni,material,rang,
-            tolov_usuli,oraliq_tolov,montaj,yetkazish,kafolat_muddati)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (d["kod"],d["mijoz"],d.get("telefon",""),d.get("manzil",""),d.get("mahsulot",""),
-             float(d.get("umumiy_narx") or 0),float(d.get("oldindan_tolov") or 0),
-             d.get("boshlanish_sana",""),d.get("tugash_sana",""),d.get("taxminiy_sana",""),
-             d.get("holat","Yangi"),d.get("izoh",""),secrets.token_urlsafe(8),
-             float(d.get("kechikish_foiz") or 0),float(d.get("maks_chegirma_foiz") or 20),
-             float(d.get("keshbek_foiz") or 0),float(d.get("keshbek_summa") or 0),
-             d.get("kafolat_boshlanish",""),d.get("kafolat_tugash",""),
-             d.get("lokatsiya",""),d.get("moljal",""),d.get("qavat",""),
-             d.get("lift",""),d.get("katta_mashina",""),d.get("masul_xodim",""),
-             d.get("pasport_id",""),d.get("olcham",""),int(d.get("soni") or 1),
-             d.get("material",""),d.get("rang",""),d.get("tolov_usuli","Naqd"),
-             float(d.get("oraliq_tolov") or 0),d.get("montaj","Kiritilgan"),
-             d.get("yetkazish","Kiritilgan"),d.get("kafolat_muddati","12 oy")))
-            oid=cur.lastrowid
-            c.executemany("INSERT INTO buyurtma_bosqichlari(buyurtma_id,bosqich) VALUES(?,?)",
-                          [(oid,s) for s in STAGES])
-            c.commit(); c.close()
-            try:
-                contract=generate_order_contract(oid)
-                return jsonify({"status":"ok","buyurtma_id":oid,"shartnoma_versiya":contract["version"]})
-            except Exception as contract_error:
-                return jsonify({"status":"ok","buyurtma_id":oid,
-                                "warning":"Buyurtma saqlandi, shartnoma yaratishda xato: "+str(contract_error)})
-        except Exception as e:
-            c.close(); return jsonify({"message":str(e)}),400
-    c=get_db()
-    rows=c.execute("""SELECT *,
-    MAX(0,CAST(julianday('now')-julianday(tugash_sana) AS INTEGER)) kechikkan_kun,
-    ROUND(MIN(CASE WHEN kechikish_turi='Korxona' THEN MAX(0,julianday('now')-julianday(tugash_sana))*kechikish_foiz ELSE 0 END,maks_chegirma_foiz),2) chegirma_foiz,
-    ROUND(MAX(0,(umumiy_narx-oldindan_tolov)*(1-MIN(CASE WHEN kechikish_turi='Korxona' THEN MAX(0,julianday('now')-julianday(tugash_sana))*kechikish_foiz ELSE 0 END,maks_chegirma_foiz)/100.0)),2) qoldiq
-    FROM buyurtmalar ORDER BY id DESC""").fetchall()
-    c.close(); return jsonify([dict(r) for r in rows])
-
-
-@app.route("/api/buyurtma/<int:oid>/bosqichlar")
-def order_stages(oid):
-    c=get_db(); rows=c.execute("SELECT * FROM buyurtma_bosqichlari WHERE buyurtma_id=? ORDER BY id",(oid,)).fetchall()
-    c.close(); return jsonify([dict(r) for r in rows])
-
-
-@app.route("/api/buyurtma-bosqich/<int:sid>", methods=["POST"])
-def stage_toggle(sid):
-    d=jdata(); c=get_db()
-    done=1 if d.get("bajarildi") else 0
-    now_text=_tashkent_now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("""UPDATE buyurtma_bosqichlari SET bajarildi=?,
-      boshlanish_vaqti=CASE WHEN ?=1 AND boshlanish_vaqti='' THEN ? ELSE boshlanish_vaqti END,
-      tugash_vaqti=CASE WHEN ?=1 THEN ? ELSE '' END,
-      ishchi=COALESCE(NULLIF(?,''),ishchi),izoh=COALESCE(NULLIF(?,''),izoh),media_url=COALESCE(NULLIF(?,''),media_url)
-      WHERE id=?""",(done,done,now_text,done,now_text,d.get("ishchi",''),d.get("izoh",''),d.get("media_url",''),sid))
-    c.commit(); c.close(); return jsonify({"status":"ok"})
-
-
-
-# ---------- V5.1 PRO MODULLAR ----------
-@app.route("/api/pro/bosqich-hodisa", methods=["POST"])
-def pro_stage_event_add():
-    d=jdata(); c=get_db()
-    c.execute("""INSERT INTO buyurtma_bosqich_hodisalari
-        (buyurtma_id,bosqich,boshlandi,tugadi,ishchi_id,izoh,media_havola)
-        VALUES(?,?,?,?,?,?,?)""",
-        (int(d["buyurtma_id"]),d.get("bosqich",""),d.get("boshlandi",""),
-         d.get("tugadi",""),int(d["ishchi_id"]) if d.get("ishchi_id") else None,
-         d.get("izoh",""),d.get("media_havola","")))
-    c.commit(); c.close(); return jsonify({"status":"ok"})
-
-@app.route("/api/pro/media", methods=["POST"])
-def pro_media_add():
-    d=jdata(); c=get_db()
-    c.execute("INSERT INTO buyurtma_media(buyurtma_id,turi,havola,izoh) VALUES(?,?,?,?)",
-              (int(d["buyurtma_id"]),d.get("turi","Rasm"),d["havola"],d.get("izoh","")))
-    c.commit(); c.close(); return jsonify({"status":"ok"})
-
-@app.route("/api/pro/tasdiq", methods=["POST"])
-def pro_approval_add():
-    d=jdata(); c=get_db()
-    c.execute("""INSERT INTO buyurtma_tasdiqlari
-        (buyurtma_id,turi,holat,izoh,tasdiqlagan,tasdiqlangan_vaqt)
-        VALUES(?,?,?,?,?,?)""",
-        (int(d["buyurtma_id"]),d.get("turi","Chizma"),d.get("holat","Tasdiqlandi"),
-         d.get("izoh",""),d.get("tasdiqlagan",""),
-         _tashkent_now().strftime("%Y-%m-%d %H:%M:%S")))
-    c.commit(); c.close(); return jsonify({"status":"ok"})
-
-@app.route("/api/pro/baho", methods=["POST"])
-def pro_rating_add():
-    d=jdata(); c=get_db()
-    vals=[max(1,min(5,int(d.get(k,5)))) for k in ["sifat","muddat","muomala","yetkazish","montaj"]]
-    umumiy=round(sum(vals)/len(vals))
-    c.execute("""INSERT INTO baholar
-        (buyurtma_id,sifat,muddat,muomala,yetkazish,montaj,umumiy,izoh,rasm_havola,reklama_ruxsat)
-        VALUES(?,?,?,?,?,?,?,?,?,?)""",
-        (int(d["buyurtma_id"]),*vals,umumiy,d.get("izoh",""),d.get("rasm_havola",""),
-         1 if d.get("reklama_ruxsat") else 0))
-    c.commit(); c.close(); return jsonify({"status":"ok","umumiy":umumiy})
-
-@app.route("/api/pro/servis", methods=["POST"])
-def pro_service_add():
-    d=jdata(); c=get_db()
-    c.execute("""INSERT INTO servis_murojaatlari
-        (buyurtma_id,turi,muammo,media_havola,holat,servis_sana,pullik)
-        VALUES(?,?,?,?,?,?,?)""",
-        (int(d["buyurtma_id"]),d.get("turi","Servis"),d["muammo"],
-         d.get("media_havola",""),d.get("holat","Qabul qilindi"),
-         d.get("servis_sana",""),1 if d.get("pullik") else 0))
-    c.commit(); c.close(); return jsonify({"status":"ok"})
-
-@app.route("/api/pro/qoshimcha-ish", methods=["POST"])
-def pro_extra_work_add():
-    d=jdata(); c=get_db()
-    c.execute("""INSERT INTO qoshimcha_ishlar
-        (buyurtma_id,nomi,summa,qoshimcha_kun,mijoz_tasdiq,kim_kiritdi)
-        VALUES(?,?,?,?,?,?)""",
-        (int(d["buyurtma_id"]),d["nomi"],float(d.get("summa") or 0),
-         int(d.get("qoshimcha_kun") or 0),1 if d.get("mijoz_tasdiq") else 0,
-         d.get("kim_kiritdi","Rahbar")))
-    c.execute("UPDATE buyurtmalar SET umumiy_narx=umumiy_narx+? WHERE id=?",
-              (float(d.get("summa") or 0),int(d["buyurtma_id"])))
-    c.commit(); c.close(); return jsonify({"status":"ok"})
-
-@app.route("/api/pro/rezerv", methods=["POST"])
-def pro_stock_reserve():
-    d=jdata(); c=get_db()
-    c.execute("""INSERT INTO ombor_rezervlari(buyurtma_id,material_id,miqdor)
-                 VALUES(?,?,?)""",
-              (int(d["buyurtma_id"]),int(d["material_id"]),float(d.get("miqdor") or 0)))
-    c.commit(); c.close(); return jsonify({"status":"ok"})
-
-@app.route("/api/pro/tannarx", methods=["POST"])
-def pro_cost_save():
-    d=jdata(); c=get_db()
-    vals=[float(d.get(k) or 0) for k in ["material","ishchi","boyoq","oyna","furnitura","transport","elektr","tashqi_xizmat","boshqa"]]
-    c.execute("""INSERT INTO buyurtma_tannarxi
-        (buyurtma_id,material,ishchi,boyoq,oyna,furnitura,transport,elektr,tashqi_xizmat,boshqa)
-        VALUES(?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(buyurtma_id) DO UPDATE SET
-        material=excluded.material,ishchi=excluded.ishchi,boyoq=excluded.boyoq,
-        oyna=excluded.oyna,furnitura=excluded.furnitura,transport=excluded.transport,
-        elektr=excluded.elektr,tashqi_xizmat=excluded.tashqi_xizmat,boshqa=excluded.boshqa""",
-        (int(d["buyurtma_id"]),*vals))
-    c.commit(); c.close(); return jsonify({"status":"ok","jami":sum(vals)})
-
-@app.route("/api/pro/xabar", methods=["POST"])
-def pro_message_add():
-    d=jdata(); c=get_db()
-    c.execute("""INSERT INTO tizim_xabarlari
-        (foydalanuvchi_turi,foydalanuvchi_id,buyurtma_id,mavzu,matn,kanal)
-        VALUES(?,?,?,?,?,?)""",
-        (d.get("foydalanuvchi_turi","Mijoz"),d.get("foydalanuvchi_id"),
-         d.get("buyurtma_id"),d["mavzu"],d["matn"],d.get("kanal","Sayt")))
-    c.commit(); c.close(); return jsonify({"status":"ok"})
-
-@app.route("/api/pro/buyurtma/<int:oid>")
-def pro_order_bundle(oid):
-    c=get_db()
-    order=c.execute("SELECT * FROM buyurtmalar WHERE id=?",(oid,)).fetchone()
-    stages=c.execute("SELECT * FROM buyurtma_bosqich_hodisalari WHERE buyurtma_id=? ORDER BY id",(oid,)).fetchall()
-    media=c.execute("SELECT * FROM buyurtma_media WHERE buyurtma_id=? ORDER BY id DESC",(oid,)).fetchall()
-    approvals=c.execute("SELECT * FROM buyurtma_tasdiqlari WHERE buyurtma_id=? ORDER BY id DESC",(oid,)).fetchall()
-    payments=c.execute("SELECT * FROM buyurtma_tolovlari WHERE buyurtma_id=? ORDER BY id DESC",(oid,)).fetchall()
-    services=c.execute("SELECT * FROM servis_murojaatlari WHERE buyurtma_id=? ORDER BY id DESC",(oid,)).fetchall()
-    extras=c.execute("SELECT * FROM qoshimcha_ishlar WHERE buyurtma_id=? ORDER BY id DESC",(oid,)).fetchall()
-    rating=c.execute("SELECT * FROM baholar WHERE buyurtma_id=? ORDER BY id DESC LIMIT 1",(oid,)).fetchone()
-    cost=c.execute("SELECT * FROM buyurtma_tannarxi WHERE buyurtma_id=?",(oid,)).fetchone()
-    c.close()
-    return jsonify({
-        "order":dict(order) if order else None,
-        "stages":[dict(x) for x in stages],
-        "media":[dict(x) for x in media],
-        "approvals":[dict(x) for x in approvals],
-        "payments":[dict(x) for x in payments],
-        "services":[dict(x) for x in services],
-        "extras":[dict(x) for x in extras],
-        "rating":dict(rating) if rating else None,
-        "cost":dict(cost) if cost else None
-    })
-
-# ---------- OMBOR ----------
-@app.route("/api/ombor", methods=["GET"])
-def stock_get():
-    c=get_db(); rows=c.execute("SELECT * FROM ombor ORDER BY kategoriya,nomi").fetchall()
-    c.close(); return jsonify([dict(r) for r in rows])
-
-
-@app.route("/api/ombor-harakat", methods=["POST"])
-def stock_move():
-    d=jdata()
-    try:
-        qty=float(d.get("miqdor") or 0); typ=d.get("turi","Kirim")
-        delta=qty if typ=="Kirim" else -qty
-        c=get_db()
-        c.execute("UPDATE ombor SET qoldiq=qoldiq+? WHERE id=?",(delta,int(d["material_id"])))
-        c.execute("""INSERT INTO ombor_harakat(material_id,sana,turi,miqdor,buyurtma_kodi,izoh)
-        VALUES(?,?,?,?,?,?)""",(int(d["material_id"]),d["sana"],typ,qty,d.get("buyurtma_kodi",""),d.get("izoh","")))
-        c.commit(); c.close(); return jsonify({"status":"ok"})
-    except Exception as e:
-        return jsonify({"message":str(e)}),400
-
-
-# ---------- SAFAR ----------
-@app.route("/api/safarlar", methods=["GET","POST"])
-def trips():
-    if request.method=="POST":
-        d=jdata(); c=get_db()
-        c.execute("""INSERT INTO safarlar(ishchi_id,sana,mashina,qayerdan,qayerga,masofa_km,sabab,yonilgi,xarajat)
-        VALUES(?,?,?,?,?,?,?,?,?)""",(int(d["ishchi_id"]),d["sana"],d.get("mashina",""),d.get("qayerdan",""),
-        d.get("qayerga",""),float(d.get("masofa_km") or 0),d.get("sabab",""),
-        float(d.get("yonilgi") or 0),float(d.get("xarajat") or 0)))
-        c.commit(); c.close(); return jsonify({"status":"ok"})
-    c=get_db(); rows=c.execute("""SELECT s.*,i.ism,i.familiya FROM safarlar s
-    JOIN ishchilar i ON i.id=s.ishchi_id ORDER BY sana DESC,s.id DESC LIMIT 200""").fetchall()
-    c.close(); return jsonify([dict(r) for r in rows])
-
-
-# ---------- QO‘SHIMCHA MODULLAR ----------
-@app.route("/api/xarajatlar", methods=["GET","POST"])
-def expenses():
-    if request.method=="POST":
-        d=jdata(); c=get_db()
-        c.execute("INSERT INTO xarajatlar(sana,kategoriya,miqdor,tavsifi,buyurtma_kodi,tolov_usuli,xarajat_nomi,kimga_berildi,chek_havola) VALUES(?,?,?,?,?,?,?,?,?)",
-                  (d["sana"],d.get("kategoriya","Boshqa"),float(d.get("miqdor") or 0),
-                   d.get("tavsifi",""),d.get("buyurtma_kodi",""),d.get("tolov_usuli","Naqd"),
-                   d.get("xarajat_nomi",""),d.get("kimga_berildi",""),d.get("chek_havola","")))
-        c.commit(); c.close(); log_action("Xarajat qo‘shildi", d.get("kategoriya","")); return jsonify({"status":"ok"})
-    c=get_db(); rows=c.execute("SELECT * FROM xarajatlar ORDER BY sana DESC,id DESC LIMIT 300").fetchall(); c.close()
-    return jsonify([dict(r) for r in rows])
-
-@app.route("/api/bonuslar", methods=["GET","POST"])
-def bonuses():
-    if request.method=="POST":
-        d=jdata(); c=get_db(); c.execute("INSERT INTO bonuslar(ishchi_id,sana,miqdor,sababi) VALUES(?,?,?,?)",
-            (int(d["ishchi_id"]),d["sana"],float(d.get("miqdor") or 0),d.get("sababi","")))
-        c.commit(); c.close(); log_action("Bonus qo‘shildi", str(d.get("ishchi_id"))); return jsonify({"status":"ok"})
-    c=get_db(); rows=c.execute("""SELECT b.*,i.ism,i.familiya FROM bonuslar b JOIN ishchilar i ON i.id=b.ishchi_id
-        ORDER BY sana DESC,b.id DESC LIMIT 200""").fetchall(); c.close(); return jsonify([dict(r) for r in rows])
-
-@app.route("/api/ishchi-holatlari", methods=["GET","POST"])
-def worker_statuses():
-    if request.method=="POST":
-        d=jdata(); c=get_db(); c.execute("INSERT INTO ishchi_holatlari(ishchi_id,sana,turi,izoh) VALUES(?,?,?,?)",
-            (int(d["ishchi_id"]),d["sana"],d.get("turi","Dam olish"),d.get("izoh","")))
-        c.commit(); c.close(); return jsonify({"status":"ok"})
-    c=get_db(); rows=c.execute("""SELECT h.*,i.ism,i.familiya FROM ishchi_holatlari h JOIN ishchilar i ON i.id=h.ishchi_id
-        ORDER BY sana DESC,h.id DESC LIMIT 200""").fetchall(); c.close(); return jsonify([dict(r) for r in rows])
-
-@app.route("/api/buyurtma/<int:oid>/tolovlar", methods=["GET","POST"])
-def order_payments(oid):
-    c=get_db()
-    if request.method=="POST":
-        d=jdata(); amount=float(d.get("miqdor") or 0)
-        c.execute("INSERT INTO buyurtma_tolovlari(buyurtma_id,sana,miqdor,turi,izoh) VALUES(?,?,?,?,?)",
-                  (oid,d["sana"],amount,d.get("turi","To‘lov"),d.get("izoh","")))
-        c.execute("UPDATE buyurtmalar SET oldindan_tolov=oldindan_tolov+? WHERE id=?",(amount,oid))
-        c.commit(); c.close(); return jsonify({"status":"ok"})
-    rows=c.execute("SELECT * FROM buyurtma_tolovlari WHERE buyurtma_id=? ORDER BY sana DESC,id DESC",(oid,)).fetchall(); c.close()
-    return jsonify([dict(r) for r in rows])
-
-@app.route("/api/tayyor-mahsulot", methods=["GET","POST"])
-def finished_goods():
-    if request.method=="POST":
-        d=jdata(); c=get_db(); c.execute("INSERT INTO tayyor_mahsulot(nomi,kodi,rang,miqdor,birlik,narx,izoh) VALUES(?,?,?,?,?,?,?)",
-            (d["nomi"],d.get("kodi",""),d.get("rang",""),float(d.get("miqdor") or 0),d.get("birlik","dona"),float(d.get("narx") or 0),d.get("izoh","")))
-        c.commit(); c.close(); return jsonify({"status":"ok"})
-    c=get_db(); rows=c.execute("SELECT * FROM tayyor_mahsulot ORDER BY id DESC").fetchall(); c.close(); return jsonify([dict(r) for r in rows])
-
-@app.route("/api/moliyaviy-xulosa")
-def finance_summary():
-    start=request.args.get("start") or "1900-01-01"; end=request.args.get("end") or "2999-12-31"
-    c=get_db()
-    income=c.execute("SELECT COALESCE(SUM(oldindan_tolov),0) FROM buyurtmalar WHERE date(created_at) BETWEEN ? AND ?",(start,end)).fetchone()[0]
-    expense=c.execute("SELECT COALESCE(SUM(miqdor),0) FROM xarajatlar WHERE sana BETWEEN ? AND ?",(start,end)).fetchone()[0]
-    salary=c.execute("SELECT COALESCE(SUM(miqdor),0) FROM tolovlar WHERE sana BETWEEN ? AND ?",(start,end)).fetchone()[0]
-    bonus=c.execute("SELECT COALESCE(SUM(miqdor),0) FROM bonuslar WHERE sana BETWEEN ? AND ?",(start,end)).fetchone()[0]
-    c.close(); return jsonify({"kirim":income,"xarajat":expense,"ishchi_tolov":salary,"bonus":bonus,"sof_foyda":income-expense-salary-bonus})
-
-@app.route("/api/buyurtma-progress/<int:oid>")
-def order_progress(oid):
-    c=get_db(); row=c.execute("SELECT COUNT(*) jami,SUM(bajarildi) bajarildi FROM buyurtma_bosqichlari WHERE buyurtma_id=?",(oid,)).fetchone(); c.close()
-    jami=row['jami'] or 0; done=row['bajarildi'] or 0; return jsonify({"foiz": round(done*100/jami,1) if jami else 0})
-
-def _order_bundle(oid):
-    c=get_db()
-    order=c.execute("SELECT * FROM buyurtmalar WHERE id=?",(oid,)).fetchone()
-    stages=c.execute("SELECT * FROM buyurtma_bosqichlari WHERE buyurtma_id=? ORDER BY id",(oid,)).fetchall()
-    pays=c.execute("SELECT * FROM buyurtma_tolovlari WHERE buyurtma_id=? ORDER BY sana,id",(oid,)).fetchall()
-    c.close()
-    return order,stages,pays
-
-@app.route("/kuzatuv/<token>")
-def public_track(token):
-    c=get_db()
-    order=c.execute("SELECT * FROM buyurtmalar WHERE tracking_token=?",(token,)).fetchone()
-    if not order:
-        c.close()
-        return "Buyurtma topilmadi",404
-    stages=c.execute("SELECT * FROM buyurtma_bosqichlari WHERE buyurtma_id=? ORDER BY id",(order['id'],)).fetchall()
-    messages=c.execute(
-        '''SELECT * FROM tizim_xabarlari
-           WHERE buyurtma_id=? AND (foydalanuvchi_turi='Mijoz' OR foydalanuvchi_turi='')
-           ORDER BY id DESC LIMIT 20''',
-        (order['id'],)
-    ).fetchall()
-    delivery=c.execute(
-        "SELECT y.*, i.ism AS haydovchi_ism, i.familiya AS haydovchi_familiya, i.telefon AS haydovchi_telefon "
-        "FROM yetkazishlar y LEFT JOIN ishchilar i ON i.id=y.haydovchi_id "
-        "WHERE y.buyurtma_id=? ORDER BY y.id DESC LIMIT 1",
-        (order['id'],)
-    ).fetchone()
-    c.close()
-    done=sum(int(x['bajarildi']) for x in stages)
-    pct=round(done*100/len(stages)) if stages else 0
-    html=r'''<!doctype html><html lang="uz"><head><meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta http-equiv="refresh" content="15"><title>{{o['kod']}} — Buyurtma kuzatuvi</title>
-    <style>
-    *{box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif;background:radial-gradient(circle at top left,#dbeafe,transparent 30%),radial-gradient(circle at top right,#dcfce7,transparent 28%),#f5f7fb;margin:0;color:#172033}.page{max-width:760px;margin:auto;padding:16px}.hero{position:relative;overflow:hidden;background:linear-gradient(135deg,#0f172a,#1d4ed8 58%,#0f766e);color:#fff;border-radius:24px;padding:24px;box-shadow:0 20px 55px #0f172a2a}.hero:after{content:"";position:absolute;width:230px;height:230px;border-radius:50%;right:-90px;top:-120px;background:#ffffff12}.brand{font-size:13px;font-weight:900;letter-spacing:1.3px;color:#bfdbfe}.code{font-size:32px;font-weight:900;margin:8px 0 3px}.product{color:#dbeafe}.summary{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:18px}.chip{background:#ffffff15;border:1px solid #ffffff26;border-radius:14px;padding:11px}.chip small{display:block;color:#bfdbfe;margin-bottom:4px}.box{background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:18px;margin-top:14px;box-shadow:0 12px 32px #0f172a0d}h2,h3{margin:0 0 12px}.progress-head{display:flex;justify-content:space-between;align-items:end;gap:12px}.pct{font-size:31px;font-weight:900;color:#16a34a}.bar{height:15px;background:#e2e8f0;border-radius:20px;overflow:hidden;margin:10px 0 5px}.fill{height:100%;background:linear-gradient(90deg,#16a34a,#22c55e);border-radius:20px}.stage{display:flex;align-items:center;gap:10px;padding:11px 2px;border-bottom:1px solid #eef2f7}.stage:last-child{border-bottom:0}.dot{width:30px;height:30px;display:grid;place-items:center;border-radius:10px;background:#f1f5f9}.stage.ok .dot{background:#dcfce7}.stage.wait{color:#64748b}.news{position:relative;padding:12px 12px 12px 48px;border-radius:14px;background:#f8fafc;border:1px solid #e2e8f0;margin:9px 0}.news:before{content:"🔔";position:absolute;left:13px;top:13px;font-size:20px}.news b{display:block;color:#0f172a}.news p{margin:5px 0 0;line-height:1.45}.news small{display:block;margin-top:6px;color:#64748b}.delivery{background:#eff6ff;border-color:#bfdbfe}.status{font-size:19px;font-weight:900;border-radius:13px;background:#fff;padding:12px}.road{color:#ea580c}.arrived{color:#7c3aed}.delivered{color:#15803d}.planned{color:#64748b}.muted{color:#64748b;font-size:13px}.refresh{text-align:center;color:#64748b;font-size:12px;padding:15px 0 7px}@media(max-width:520px){.page{padding:9px}.hero{border-radius:18px;padding:20px}.code{font-size:27px}.summary{grid-template-columns:1fr}.box{border-radius:16px;padding:15px}}
-    </style></head><body><main class="page"><section class="hero"><div class="brand">PHARM MEBEL · MEBEL360°</div><div class="code">{{o['kod']}}</div><div class="product">{{o['mahsulot'] or 'Buyurtma'}}</div><div class="summary"><div class="chip"><small>Buyurtmachi</small><b>{{o['mijoz']}}</b></div><div class="chip"><small>Hozirgi holat</small><b>{{o['holat']}}</b></div><div class="chip"><small>Mas’ul xodim</small><b>{{o['masul_xodim'] or 'Belgilanmagan'}}</b></div><div class="chip"><small>Taxminiy tayyor</small><b>{{o['taxminiy_sana'] or o['tugash_sana'] or '-'}}</b></div></div></section>
-    <section class="box"><div class="progress-head"><div><h3>Buyurtma tayyorligi</h3><div class="muted">Bajarilgan bosqichlar asosida</div></div><div class="pct">{{pct}}%</div></div><div class="bar"><div class="fill" style="width:{{pct}}%"></div></div></section>
-    {% if messages %}<section class="box"><h3>🔔 So‘nggi yangiliklar</h3>{% for m in messages %}<div class="news"><b>{{m['mavzu']}}</b><p>{{m['matn']}}</p><small>{{m['created_at']}}</small></div>{% endfor %}</section>{% endif %}
-    <section class="box"><h3>✅ Ishlab chiqarish bosqichlari</h3>{% for s in stages %}<div class="stage {{'ok' if s['bajarildi'] else 'wait'}}"><div class="dot">{{'✓' if s['bajarildi'] else '○'}}</div><div><b>{{s['bosqich']}}</b>{% if s['tugash_vaqti'] %}<div class="muted">Tugadi: {{s['tugash_vaqti']}}</div>{% endif %}</div></div>{% endfor %}</section>
-    <section class="box delivery"><h3>🚚 Yetkazib berish holati</h3>{% if delivery %}{% set h=delivery['holat'] or 'Rejalashtirilgan' %}<div class="status {{'road' if h in ['Yo‘lga chiqdim','Yo‘lga chiqdi'] else 'arrived' if h in ['Yetib keldim','Yetib keldi'] else 'delivered' if h in ['Yetkazib berdim','Yetkazib berildi','Yetkazildi'] else 'planned'}}">{% if h in ['Yo‘lga chiqdim','Yo‘lga chiqdi'] %}🚚 Shofyor yo‘lda{% elif h in ['Yetib keldim','Yetib keldi'] %}📍 Shofyor yetib keldi{% elif h in ['Yetkazib berdim','Yetkazib berildi','Yetkazildi'] %}✅ Buyurtma yetkazib berildi{% else %}🕒 Yetkazish rejalashtirilgan{% endif %}</div><p><b>Shofyor:</b> {{(delivery['haydovchi_ism'] or '')+' '+(delivery['haydovchi_familiya'] or '')}}</p><p><b>Telefon:</b> {{delivery['haydovchi_telefon'] or 'Ko‘rsatilmagan'}}</p>{% else %}<div class="status planned">🚛 Hali shofyor biriktirilmagan</div>{% endif %}</section><div class="refresh">Sahifa har 15 soniyada avtomatik yangilanadi.</div></main></body></html>'''
-    return render_template_string(html,o=order,stages=stages,pct=pct,delivery=delivery,messages=messages)
-
-
-@app.route("/buyurtma/<int:oid>/qr.png")
-def order_qr(oid):
-    c=get_db(); row=c.execute("SELECT tracking_token FROM buyurtmalar WHERE id=?",(oid,)).fetchone(); c.close()
-    if not row:return "Topilmadi",404
-    url=request.url_root.rstrip('/')+url_for('public_track',token=row['tracking_token'])
-    img=qrcode.make(url); out=io.BytesIO(); img.save(out,format='PNG'); out.seek(0)
-    return send_file(out,mimetype='image/png',download_name=f'buyurtma_{oid}_qr.png')
-
-@app.route("/buyurtma/<int:oid>/shartnoma-yaratish", methods=["POST"])
-def order_contract_regenerate(oid):
-    try:
-        result=generate_order_contract(oid)
-        return jsonify({"status":"ok","versiya":result["version"]})
-    except Exception as e:
-        return jsonify({"message":str(e)}),400
-
-
-@app.route("/buyurtma/<int:oid>/shartnoma.docx")
-def order_contract_docx(oid):
-    row=latest_order_contract(oid)
-    if not row:
-        try:
-            generate_order_contract(oid)
-            row=latest_order_contract(oid)
-        except Exception as e:
-            return "Shartnoma yaratishda xato: "+str(e),500
-    if not row or not os.path.exists(row["docx_fayl"]):
-        return "Shartnoma Word fayli topilmadi",404
-    return send_file(row["docx_fayl"],as_attachment=True,
-                     download_name=f"shartnoma_{oid}.docx",
-                     mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-
-
-@app.route("/buyurtma/<int:oid>/shartnoma.pdf")
-def order_contract_pdf(oid):
-    row=latest_order_contract(oid)
-    if not row:
-        try:
-            generate_order_contract(oid)
-            row=latest_order_contract(oid)
-        except Exception as e:
-            return "Shartnoma yaratishda xato: "+str(e),500
-    if not row or not os.path.exists(row["pdf_fayl"]):
-        return "Shartnoma PDF fayli topilmadi",404
-    return send_file(row["pdf_fayl"],mimetype="application/pdf",
-                     as_attachment=False,download_name=f"shartnoma_{oid}.pdf")
-
-
-@app.route("/buyurtma/<int:oid>/chek.pdf")
-def order_receipt_pdf(oid):
-    order,stages,pays=_order_bundle(oid)
-    if not order:return "Topilmadi",404
-    out=io.BytesIO(); p=canvas.Canvas(out,pagesize=A4); w,h=A4
-    p.setFont('Helvetica-Bold',20); p.drawCentredString(w/2,h-60,'Pharm Mebel - TOLOV CHEKI')
-    p.setFont('Helvetica',12); y=h-110
-    paid=float(order['oldindan_tolov'] or 0); remaining=float(order['umumiy_narx'] or 0)-paid
-    for line in [f"Buyurtma: {order['kod']}",f"Mijoz: {order['mijoz']}",f"Mahsulot: {order['mahsulot']}",f"Umumiy summa: {order['umumiy_narx']:,.0f} so'm",f"Jami to'langan: {paid:,.0f} so'm",f"Qoldiq: {remaining:,.0f} so'm",f"Chek sanasi: {_tashkent_today()}"]:
-        p.drawString(70,y,line); y-=25
-    p.drawString(70,y-20,'Rahmat! Pharm Mebel xizmatidan foydalanganingiz uchun.')
-    p.save(); out.seek(0); return send_file(out,mimetype='application/pdf',as_attachment=True,download_name=f"chek_{order['kod']}.pdf")
-
-@app.route("/api/buyurtma/<int:oid>/link")
-def order_public_link(oid):
-    c=get_db(); row=c.execute("SELECT tracking_token FROM buyurtmalar WHERE id=?",(oid,)).fetchone(); c.close()
-    if not row:return jsonify({'message':'Topilmadi'}),404
-    return jsonify({'url':request.url_root.rstrip('/')+url_for('public_track',token=row['tracking_token'])})
-
-@app.route("/shartnoma-namuna")
-def contract_template_download():
-    try:
-        base_dir=os.path.dirname(os.path.abspath(__file__))
-        file_path=os.path.join(base_dir,"Mebel_Shartnoma_Tuzatilgan.docx")
-        if not os.path.exists(file_path):
-            return "Word shartnoma fayli topilmadi: "+file_path,404
-        with open(file_path,"rb") as f:
-            data=f.read()
-        return Response(
-            data,
-            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition":"attachment; filename=Mebel_Shartnoma.docx"}
-        )
-    except Exception as e:
-        return "Word shartnomani ochishda xato: "+str(e),500
-
-@app.route("/shartnoma-pdf")
-def contract_pdf_download():
-    try:
-        base_dir=os.path.dirname(os.path.abspath(__file__))
-        file_path=os.path.join(base_dir,"Mebel_Shartnoma_Yakuniy.pdf")
-        if not os.path.exists(file_path):
-            return "PDF shartnoma fayli topilmadi: "+file_path,404
-        with open(file_path,"rb") as f:
-            data=f.read()
-        return Response(
-            data,
-            mimetype="application/pdf",
-            headers={"Content-Disposition":"inline; filename=Mebel_Shartnoma.pdf"}
-        )
-    except Exception as e:
-        return "PDF shartnomani ochishda xato: "+str(e),500
-
-@app.route("/backup")
-def backup_db():
-    if not os.path.exists(DB_NAME):
-        return jsonify({"message":"Baza topilmadi"}),404
-    log_action('backup_downloaded', f'user={session.get("user","")}')
-    return send_file(DB_NAME, as_attachment=True, download_name=f"pharm_mebel_backup_{_tashkent_today()}.db")
-
-@app.route("/api/audit")
-def audit_get():
-    c=get_db(); rows=c.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200").fetchall(); c.close(); return jsonify([dict(r) for r in rows])
-
-
-# ---------- MIJOZ SERVISI / KAFOLAT / YETKAZISH ----------
-@app.route("/api/buyurtma/<int:oid>/baho", methods=["GET","POST"])
-def order_rating(oid):
-    c=get_db()
-    if request.method=="POST":
-        d=jdata(); vals=[max(1,min(5,int(d.get(k) or 5))) for k in ("sifat","muddat","muomala","yetkazish","montaj")]
-        c.execute("INSERT INTO mijoz_baholari(buyurtma_id,sifat,muddat,muomala,yetkazish,montaj,izoh,reklama_ruxsat) VALUES(?,?,?,?,?,?,?,?,?)",
-                  (oid,*vals,d.get("izoh",""),1 if d.get("reklama_ruxsat") else 0)); c.commit(); c.close(); return jsonify({"status":"ok"})
-    rows=c.execute("SELECT *,ROUND((sifat+muddat+muomala+yetkazish+montaj)/5.0,1) umumiy FROM mijoz_baholari WHERE buyurtma_id=? ORDER BY id DESC",(oid,)).fetchall(); c.close(); return jsonify([dict(r) for r in rows])
-
-@app.route("/api/servis", methods=["GET","POST"])
-def service_api():
-    c=get_db()
-    if request.method=="POST":
-        d=jdata(); c.execute("INSERT INTO servis_murojaatlari(buyurtma_id,turi,muammo,holat,servis_sana,usta,izoh) VALUES(?,?,?,?,?,?,?)",
-          (int(d["buyurtma_id"]),d.get("turi","Servis"),d.get("muammo",""),d.get("holat","Qabul qilindi"),d.get("servis_sana",""),d.get("usta",""),d.get("izoh",""))); c.commit(); c.close(); return jsonify({"status":"ok"})
-    rows=c.execute("""SELECT s.*,b.kod,b.mijoz FROM servis_murojaatlari s JOIN buyurtmalar b ON b.id=s.buyurtma_id ORDER BY s.id DESC""").fetchall(); c.close(); return jsonify([dict(r) for r in rows])
-
-@app.route("/api/servis/<int:sid>", methods=["POST"])
-def service_update(sid):
-    d=jdata(); c=get_db(); c.execute("UPDATE servis_murojaatlari SET holat=?,servis_sana=?,usta=?,izoh=? WHERE id=?",(d.get("holat","Ko‘rib chiqilmoqda"),d.get("servis_sana",""),d.get("usta",""),d.get("izoh",""),sid)); c.commit(); c.close(); return jsonify({"status":"ok"})
-
-@app.route("/api/qoshimcha-ish", methods=["GET","POST"])
-def extras_api():
-    c=get_db()
-    if request.method=="POST":
-        d=jdata(); c.execute("INSERT INTO qoshimcha_ishlar(buyurtma_id,nomi,summa,qoshimcha_kun,tasdiq,izoh) VALUES(?,?,?,?,?,?)",(int(d["buyurtma_id"]),d.get("nomi",""),float(d.get("summa") or 0),int(d.get("qoshimcha_kun") or 0),1 if d.get("tasdiq") else 0,d.get("izoh",""))); c.commit(); c.close(); return jsonify({"status":"ok"})
-    rows=c.execute("SELECT q.*,b.kod,b.mijoz FROM qoshimcha_ishlar q JOIN buyurtmalar b ON b.id=q.buyurtma_id ORDER BY q.id DESC").fetchall(); c.close(); return jsonify([dict(r) for r in rows])
-
-@app.route("/api/yetkazish", methods=["GET","POST"])
-def delivery_api():
-    c=get_db()
-    if request.method=="POST":
-        d=jdata(); c.execute("INSERT INTO yetkazishlar(buyurtma_id,haydovchi_id,sana,navbat,mashina,holat,benzin,yol_xarajati,izoh) VALUES(?,?,?,?,?,?,?,?,?)",(int(d["buyurtma_id"]),int(d["haydovchi_id"]) if d.get("haydovchi_id") else None,d.get("sana") or _tashkent_today(),int(d.get("navbat") or 1),d.get("mashina",""),d.get("holat","Rejalashtirilgan"),float(d.get("benzin") or 0),float(d.get("yol_xarajati") or 0),d.get("izoh",""))); c.commit(); c.close(); return jsonify({"status":"ok"})
-    rows=c.execute("""SELECT y.*,b.kod,b.mijoz,b.telefon,b.manzil,b.lokatsiya,i.ism haydovchi_ism,i.familiya haydovchi_familiya FROM yetkazishlar y JOIN buyurtmalar b ON b.id=y.buyurtma_id LEFT JOIN ishchilar i ON i.id=y.haydovchi_id ORDER BY y.sana DESC,y.navbat""").fetchall(); c.close(); return jsonify([dict(r) for r in rows])
-
-@app.route("/api/yetkazish/<int:yid>/holat", methods=["POST"])
-def delivery_status(yid):
-    d=jdata(); holat=d.get("holat","Rejalashtirilgan"); now=_tashkent_now().strftime('%Y-%m-%d %H:%M')
-    field={"Yo‘lga chiqdim":"yolga_chiqdi","Yetib keldim":"yetib_keldi","Yetkazib berdim":"topshirildi"}.get(holat)
-    c=get_db(); c.execute("UPDATE yetkazishlar SET holat=? WHERE id=?",(holat,yid))
-    if field: c.execute(f"UPDATE yetkazishlar SET {field}=? WHERE id=?",(now,yid))
-    c.commit(); c.close(); return jsonify({"status":"ok"})
-
-@app.route("/api/mijoz-xulosa")
-def customer_summary():
-    c=get_db(); row=c.execute("""SELECT COUNT(*) buyurtmalar,COALESCE(SUM(umumiy_narx),0) jami_summa,COALESCE(SUM(oldindan_tolov),0) tushgan,
-      COALESCE(AVG((sifat+muddat+muomala+yetkazish+montaj)/5.0),0) reyting FROM buyurtmalar LEFT JOIN mijoz_baholari ON mijoz_baholari.buyurtma_id=buyurtmalar.id""").fetchone(); c.close(); return jsonify(dict(row))
-
-# ---------- JAMLANMA / REYTING ----------
-@app.route("/api/jami")
-def totals():
-    start=request.args.get("start") or "1900-01-01"
-    end=request.args.get("end") or "2999-12-31"
-    c=get_db()
-    rows=c.execute("""
-    SELECT i.id,i.ism,i.familiya,i.lavozim,i.sifat_ball,i.tezlik_ball,i.intizom_ball,
-    COALESCE(a.kun,0) ish_kunlari,COALESCE(a.soat,0) jami_soat,
-    COALESCE(n.miqdor,0) jami_miqdor,COALESCE(n.haq,0) ish_haqi,
-    COALESCE(j.jarima,0) jarima,COALESCE(t.tolov,0) tolangan,COALESCE(b.bonus,0) bonus,
-    ROUND(COALESCE(n.haq,0)+COALESCE(b.bonus,0)-COALESCE(j.jarima,0)-COALESCE(t.tolov,0),2) qoldiq,
-    ROUND((i.sifat_ball+i.tezlik_ball+i.intizom_ball)/3.0 +
-          MIN(COALESCE(n.miqdor,0)/100.0,5),2) reyting
-    FROM ishchilar i
-    LEFT JOIN (SELECT ishchi_id,COUNT(DISTINCT sana) kun,ROUND(SUM(ish_soatlari),2) soat
-               FROM keldi_ketdi WHERE sana BETWEEN ? AND ? GROUP BY ishchi_id) a ON a.ishchi_id=i.id
-    LEFT JOIN (SELECT ishchi_id,ROUND(SUM(miqdor),2) miqdor,ROUND(SUM(jami_haq),2) haq
-               FROM ish_natijalari WHERE sana BETWEEN ? AND ? GROUP BY ishchi_id) n ON n.ishchi_id=i.id
-    LEFT JOIN (SELECT ishchi_id,ROUND(SUM(miqdor),2) jarima
-               FROM jarimalar WHERE sana BETWEEN ? AND ? GROUP BY ishchi_id) j ON j.ishchi_id=i.id
-    LEFT JOIN (SELECT ishchi_id,ROUND(SUM(miqdor),2) tolov
-               FROM tolovlar WHERE sana BETWEEN ? AND ? GROUP BY ishchi_id) t ON t.ishchi_id=i.id
-    LEFT JOIN (SELECT ishchi_id,ROUND(SUM(miqdor),2) bonus
-               FROM bonuslar WHERE sana BETWEEN ? AND ? GROUP BY ishchi_id) b ON b.ishchi_id=i.id
-    WHERE i.faol=1 ORDER BY reyting DESC,i.ism
-    """,(start,end,start,end,start,end,start,end,start,end)).fetchall()
-    c.close(); return jsonify([dict(r) for r in rows])
-
-
-@app.route("/api/dashboard")
-def dashboard():
-    c=get_db(); today=_tashkent_today()
-    data={
-      "workers":c.execute("SELECT COUNT(*) FROM ishchilar WHERE faol=1").fetchone()[0],
-      "orders":c.execute("SELECT COUNT(*) FROM buyurtmalar WHERE holat!='Yetkazildi'").fetchone()[0],
-      "hours":c.execute("SELECT COALESCE(SUM(ish_soatlari),0) FROM keldi_ketdi WHERE sana=?",(today,)).fetchone()[0],
-      "production":c.execute("SELECT COALESCE(SUM(miqdor),0) FROM ish_natijalari WHERE sana=?",(today,)).fetchone()[0],
-      "km":c.execute("SELECT COALESCE(SUM(masofa_km),0) FROM safarlar WHERE sana=?",(today,)).fetchone()[0],
-      "low_stock":c.execute("SELECT COUNT(*) FROM ombor WHERE qoldiq<=min_qoldiq").fetchone()[0]
-    }
-    c.close(); return jsonify(data)
-
-
-@app.route("/export/jami.csv")
-def export_csv():
-    start=request.args.get("start") or "1900-01-01"; end=request.args.get("end") or "2999-12-31"
-    c=get_db()
-    rows=c.execute("""SELECT i.ism||' '||i.familiya ishchi,i.lavozim,
-    COALESCE(SUM(n.miqdor),0) miqdor,COALESCE(SUM(n.jami_haq),0) ish_haqi
-    FROM ishchilar i LEFT JOIN ish_natijalari n ON n.ishchi_id=i.id AND n.sana BETWEEN ? AND ?
-    WHERE i.faol=1 GROUP BY i.id ORDER BY ishchi""",(start,end)).fetchall()
-    c.close()
-    out=io.StringIO(); w=csv.writer(out); w.writerow(["Ishchi","Lavozim","Miqdor","Ish haqi"])
-    for r in rows:w.writerow(list(r))
-    return Response(out.getvalue(),mimetype="text/csv",
-                    headers={"Content-Disposition":"attachment; filename=jami_hisob.csv"})
-
-
-# ---------- ISHCHI RO'YXATDAN O'TISH VA SHAXSIY KABINET ----------
-def normalize_phone(value):
-    digits=''.join(ch for ch in str(value or '') if ch.isdigit())
-    if digits.startswith('998') and len(digits)==12:
-        return '+'+digits
-    if len(digits)==9:
-        return '+998'+digits
-    return '+'+digits if digits else ''
-
-
-def make_otp():
-    return f"{secrets.randbelow(1000000):06d}"
-
-
-@app.route('/ishchi/royxat', methods=['GET','POST'])
-def worker_register():
-    msg=''; error=''; demo_code=''
-    if request.method=='POST':
-        phone=normalize_phone(request.form.get('telefon'))
-        if len(phone)<10:
-            error='Telefon raqamini to‘g‘ri kiriting.'
+    total = int(stats["total"] or 0)
+    cuts = int(stats["cuts"] or 0)
+    edges = int(stats["edges"] or 0)
+    progress = _job_progress_from_counts(total, cuts, edges, job["delivery_status"] or "Kutilmoqda")
+    if cut_done and not int(old["cut_done"] or 0):
+        if total and cuts == total:
+            _add_customer_update(conn, job["id"], "all-cut-done", "Kroy ishlari tugadi", f"{job['order_code']} buyurtmasining barcha detallari kesildi. Endi kromka ishlari davom etadi.", "Kroy", max(40, progress))
         else:
-            c=get_db()
-            existing=c.execute('SELECT id FROM ishchi_akkauntlari WHERE telefon=?',(phone,)).fetchone()
-            if existing:
-                error='Bu telefon raqami avval ro‘yxatdan o‘tgan.'
-            else:
-                code=make_otp()
-                expires=datetime.now().timestamp()+600
-                c.execute('DELETE FROM ishchi_otp WHERE telefon=?',(phone,))
-                c.execute('INSERT INTO ishchi_otp(telefon,kod_hash,muddati) VALUES(?,?,?)',
-                          (phone,generate_password_hash(code),str(expires)))
-                c.commit(); c.close()
-                session['worker_pending_phone']=phone
-                # Haqiqiy SMS provayder ulanmaguncha kod admin panelida ko‘rinadi.
-                if os.environ.get('DEV_SHOW_OTP','0')=='1':
-                    demo_code=code
-                msg='Tasdiqlash kodi yaratildi. Kodni kiriting.'
-    return render_template_string(WORKER_REGISTER_HTML,msg=msg,error=error,demo_code=demo_code)
-
-
-@app.route('/ishchi/kod', methods=['GET','POST'])
-def worker_verify():
-    phone=session.get('worker_pending_phone','')
-    if not phone:
-        return redirect(url_for('worker_register'))
-    error=''
-    if request.method=='POST':
-        code=request.form.get('kod','').strip()
-        login=request.form.get('login','').strip()
-        password=request.form.get('password','')
-        ism=request.form.get('ism','').strip()
-        familiya=request.form.get('familiya','').strip()
-        if len(login)<3 or not ism:
-            error='Ism va kamida 3 belgili login kiriting.'
-        elif _weak_password(password):
-            error='Parol kamida 8 belgidan iborat bo‘lib, harf va raqamni birga o‘z ichiga olishi kerak.'
+            _add_customer_update(conn, job["id"], f"sheet-{sheet_no}-cut", f"{sheet_no}-list kesildi", f"{job['order_code']} buyurtmasining {sheet_no}-listidagi detallar kesildi.", "Kroy", progress)
+    if edge_done and not int(old["edge_done"] or 0):
+        if total and edges == total:
+            _add_customer_update(conn, job["id"], "all-edge-done", "Kromka ishlari tugadi", f"{job['order_code']} buyurtmasining barcha kromkalari urildi. Konstruktor bosqichi tayyor.", "Kromka", 80)
         else:
-            c=get_db()
-            row=c.execute('SELECT * FROM ishchi_otp WHERE telefon=? AND ishlatildi=0 ORDER BY id DESC LIMIT 1',(phone,)).fetchone()
-            if not row or float(row['muddati']) < datetime.now().timestamp() or not check_password_hash(row['kod_hash'],code):
-                error='Kod noto‘g‘ri yoki muddati tugagan.'
-            elif c.execute('SELECT 1 FROM ishchi_akkauntlari WHERE login=?',(login,)).fetchone():
-                error='Bu login band. Boshqa login tanlang.'
-            else:
-                # telefon bazadagi ishchiga mos tushsa bog‘laymiz, aks holda yangi ishchi yozuvi ochiladi
-                worker=c.execute('SELECT id FROM ishchilar WHERE telefon=? AND faol=1 LIMIT 1',(phone,)).fetchone()
-                if worker:
-                    worker_id=worker['id']
-                else:
-                    cur=c.execute('INSERT INTO ishchilar(ism,familiya,telefon,lavozim) VALUES(?,?,?,?)',
-                                  (ism,familiya,phone,'Ishchi'))
-                    worker_id=cur.lastrowid
-                c.execute('INSERT INTO ishchi_akkauntlari(ishchi_id,telefon,login,parol_hash,tasdiqlangan,admin_tasdiq) VALUES(?,?,?,?,1,0)',
-                          (worker_id,phone,login,generate_password_hash(password)))
-                c.execute('UPDATE ishchi_otp SET ishlatildi=1 WHERE id=?',(row['id'],))
-                c.commit(); c.close()
-                session.pop('worker_pending_phone',None)
-                return render_template_string(WORKER_WAIT_HTML)
-            c.close()
-    return render_template_string(WORKER_VERIFY_HTML,telefon=phone,error=error)
-
-
-@app.route('/ishchi/login', methods=['GET','POST'])
-def worker_login():
-    error=''
-    if request.method=='POST':
-        login=request.form.get('login','').strip()
-        password=request.form.get('password','')
-        locked, wait_sec = _is_login_locked('w:'+login)
-        if locked:
-            error=f'Juda ko‘p xato urinish. {wait_sec} soniyadan so‘ng qayta urinib ko‘ring.'
-        else:
-            c=get_db(); row=c.execute('SELECT * FROM ishchi_akkauntlari WHERE login=? AND faol=1',(login,)).fetchone(); c.close()
-            if not row or not check_password_hash(row['parol_hash'],password):
-                _register_failed_login('w:'+login)
-                error='Login yoki parol xato.'
-            elif not row['admin_tasdiq']:
-                error='Admin hali akkauntingizni tasdiqlamagan.'
-            else:
-                _clear_login_attempts('w:'+login)
-                session.clear(); session['worker_account_id']=row['id']; session['worker_id']=row['ishchi_id']
-                log_action('worker_login', f'login={login}')
-                return redirect(url_for('worker_dashboard'))
-    return render_template_string(WORKER_LOGIN_HTML,error=error)
-
-
-@app.route('/ishchi/logout')
-def worker_logout():
-    session.clear(); return redirect(url_for('worker_login'))
-
-
-@app.route('/ishchi/kabinet')
-def worker_dashboard():
-    wid=session.get('worker_id')
-    c=get_db()
-    worker=c.execute('SELECT * FROM ishchilar WHERE id=?',(wid,)).fetchone()
-    tasks=c.execute('SELECT * FROM ishchi_topshiriqlari WHERE ishchi_id=? ORDER BY CASE WHEN holat="Ishlayapti" THEN 0 WHEN holat="Yangi" THEN 1 ELSE 2 END,sana DESC,id DESC LIMIT 50',(wid,)).fetchall()
-    active_task=c.execute('SELECT * FROM ishchi_topshiriqlari WHERE ishchi_id=? AND holat="Ishlayapti" ORDER BY id DESC LIMIT 1',(wid,)).fetchone()
-    worker_state='Ishlayapti' if active_task else 'Bo‘sh'
-    stats=c.execute('''SELECT COUNT(DISTINCT sana) kun,COALESCE(SUM(ish_soatlari),0) soat FROM keldi_ketdi WHERE ishchi_id=?''',(wid,)).fetchone()
-    result=c.execute('SELECT COALESCE(SUM(miqdor),0) miqdor FROM ish_natijalari WHERE ishchi_id=?',(wid,)).fetchone()
-    rating=round(((worker['sifat_ball']+worker['tezlik_ball']+worker['intizom_ball'])/3.0)+min(float(result['miqdor'] or 0)/100.0,5),2)
-    c.close()
-    return render_template_string(WORKER_DASHBOARD_HTML,worker=worker,tasks=tasks,stats=stats,rating=rating,worker_state=worker_state,active_task=active_task)
-
-
-@app.route('/ishchi/topshiriq/<int:tid>/boshlash', methods=['POST'])
-def worker_task_start(tid):
-    wid=session.get('worker_id')
-    now=_tashkent_now().strftime('%Y-%m-%d %H:%M:%S')
-    c=get_db()
-    other=c.execute('SELECT id FROM ishchi_topshiriqlari WHERE ishchi_id=? AND holat="Ishlayapti" AND id<>? LIMIT 1',(wid,tid)).fetchone()
-    if other:
-        c.close()
-        flash('Avval ishlayotgan topshiriqni tugating.')
-        return redirect(url_for('worker_dashboard'))
-    c.execute('''UPDATE ishchi_topshiriqlari
-                 SET holat='Ishlayapti',progress=CASE WHEN progress<1 THEN 1 ELSE progress END,
-                     boshlandi_vaqt=CASE WHEN boshlandi_vaqt='' OR boshlandi_vaqt IS NULL THEN ? ELSE boshlandi_vaqt END
-                 WHERE id=? AND ishchi_id=?''',(now,tid,wid))
-    c.commit(); c.close()
-    return redirect(url_for('worker_dashboard'))
-
-
-@app.route('/ishchi/topshiriq/<int:tid>/tugatish', methods=['POST'])
-def worker_task_finish(tid):
-    wid=session.get('worker_id')
-    if not wid:
-        return redirect(url_for('worker_login'))
-    now=_tashkent_now().strftime('%Y-%m-%d %H:%M:%S')
-    c=get_db()
-    task=c.execute('SELECT * FROM ishchi_topshiriqlari WHERE id=? AND ishchi_id=?',(tid,wid)).fetchone()
-    worker=c.execute('SELECT * FROM ishchilar WHERE id=?',(wid,)).fetchone()
-    if not task or not worker:
-        c.close()
-        flash('Topshiriq topilmadi.')
-        return redirect(url_for('worker_dashboard'))
-    was_finished=(task['holat']=='Tayyor' and int(task['progress'] or 0)>=100)
-    c.execute('''UPDATE ishchi_topshiriqlari
-                 SET holat='Tayyor',progress=100,tugadi_vaqt=?
-                 WHERE id=? AND ishchi_id=?''',(now,tid,wid))
-    customer_message=None
-    if not was_finished:
-        customer_message=_sync_finished_work_to_customer(c,task,worker,now)
-        log_action('worker_task_finished',f"task_id={tid},order={task['buyurtma_kodi']},work={task['ish_turi']}")
-    c.commit(); c.close()
-    if customer_message:
-        flash('✅ Ish tugadi. Buyurtmachiga avtomatik xabar ko‘rsatildi.')
+            _add_customer_update(conn, job["id"], f"sheet-{sheet_no}-edge", f"{sheet_no}-list kromkasi tayyor", f"{job['order_code']} buyurtmasining {sheet_no}-list kromkasi urildi.", "Kromka", progress)
+    if total and cuts == total and edges == total:
+        status, finished_at = "Tayyor", now_iso()
+    elif cuts or edges:
+        status, finished_at = "Jarayonda", ""
     else:
-        flash('✅ Ish tugadi va 100% saqlandi.')
-    return redirect(url_for('worker_dashboard'))
+        status, finished_at = "Ishchiga yuborildi", ""
+    conn.execute("UPDATE kroy_jobs SET status=?,finished_at=? WHERE id=?", (status, finished_at, job["id"]))
+    conn.commit()
+    conn.close()
+    create_database_backup()
+    _audit(f"Ishchi list {sheet_no} holatini yangiladi: {job['order_code']}", username=job["worker_name"] or "Ishchi")
+    flash(f"List {sheet_no} saqlandi. Mijoz kuzatuvi avtomatik yangilandi.")
+    return redirect(url_for("worker_view", token=token))
+
+
+@app.post("/manager/jobs/<int:job_id>/customer-update")
+@roles_required("admin", "manager", "constructor")
+def manager_customer_update(job_id: int) -> Response:
+    job, _, _ = load_job(job_id=job_id)
+    title = request.form.get("title", "").strip()[:140]
+    message = request.form.get("message", "").strip()[:500]
+    try:
+        progress = max(0, min(100, int(request.form.get("progress", 0))))
+    except ValueError:
+        progress = 0
+    if not title or not message:
+        flash("Sarlavha va xabarni yozing", "bad")
+        return redirect(url_for("job_view", job_id=job_id))
+    conn = get_db()
+    _add_customer_update(conn, job_id, f"manual-{secrets.token_hex(6)}", title, message, "Menejer", progress)
+    conn.commit()
+    conn.close()
+    create_database_backup()
+    _audit(f"Mijozga xabar qo'shildi: {job['order_code']}")
+    flash("Xabar mijoz kuzatuv sahifasiga qo'shildi")
+    return redirect(url_for("job_view", job_id=job_id))
+
+
+@app.post("/driver/jobs/<int:job_id>/status")
+@roles_required("admin", "manager", "driver")
+def driver_update(job_id: int) -> Response:
+    job, _, _ = load_job(job_id=job_id)
+    status = request.form.get("status", "Kutilmoqda")
+    note = request.form.get("note", "").strip()[:500]
+    if status not in DELIVERY_STATUSES:
+        flash("Yetkazish holati noto'g'ri", "bad")
+        return redirect(url_for("driver_dashboard"))
+    delivered_at = now_iso() if status == "Yetkazildi" else ""
+    conn = get_db()
+    conn.execute("UPDATE kroy_jobs SET delivery_status=?,delivery_note=?,delivered_at=? WHERE id=?", (status, note, delivered_at, job_id))
+    progress_map = {"Kutilmoqda": 80, "Yetkazishga tayyor": 85, "Yo'lda": 95, "Yetkazildi": 100}
+    title_map = {"Kutilmoqda": "Yetkazish rejalashtirilmoqda", "Yetkazishga tayyor": "Buyurtma yetkazishga tayyor", "Yo'lda": "Buyurtma yo'lga chiqdi", "Yetkazildi": "Buyurtma yetkazildi"}
+    message_map = {"Kutilmoqda": f"{job['order_code']} buyurtmasining yetkazish vaqti rejalashtirilmoqda.", "Yetkazishga tayyor": f"{job['order_code']} buyurtmasi yuklash va yetkazishga tayyor.", "Yo'lda": f"{job['order_code']} buyurtmasi siz tomon yo'lga chiqdi.", "Yetkazildi": f"{job['order_code']} buyurtmasi yetkazildi. Ishonchingiz uchun rahmat!"}
+    if note:
+        message_map[status] += " " + note
+    _add_customer_update(conn, job_id, f"delivery-{status}-{secrets.token_hex(4)}", title_map[status], message_map[status], "Yetkazish", progress_map[status])
+    conn.commit()
+    conn.close()
+    create_database_backup()
+    _audit(f"Yetkazish holati: {job['order_code']} / {status}")
+    flash("Yetkazish holati saqlandi va mijozga bildirildi")
+    return redirect(url_for("driver_dashboard"))
+
+
+@app.get("/customer/<token>")
+def customer_view(token: str) -> str:
+    conn = get_db()
+    job = conn.execute("SELECT * FROM kroy_jobs WHERE customer_token=? AND customer_link_active=1", (token,)).fetchone()
+    if not job:
+        conn.close()
+        abort(404)
+    snapshot = _progress_snapshot(conn, job["id"])
+    updates = conn.execute("SELECT * FROM customer_updates WHERE job_id=? ORDER BY id DESC", (job["id"],)).fetchall()
+    conn.close()
+    return render_page(f"Buyurtma {job['order_code']}", CUSTOMER_BODY, job=job, snapshot=snapshot, stages=_customer_stages(snapshot), updates=updates)
+
+
+@app.get("/jobs/<int:job_id>/a4.pdf")
+@roles_required("admin", "constructor", "manager", "worker")
+def job_pdf(job_id: int) -> Response:
+    job, _, sheets = load_job(job_id=job_id)
+    out = build_pdf(job, sheets)
+    filename = f"kroy_{job['order_code']}.pdf".replace("/", "-")
+    return send_file(out, mimetype="application/pdf", as_attachment=False, download_name=filename)
+
+
+@app.get("/worker/<token>/a4.pdf")
+def worker_pdf(token: str) -> Response:
+    job, _, sheets = load_job(token=token)
+    out = build_pdf(job, sheets)
+    filename = f"kroy_{job['order_code']}.pdf".replace("/", "-")
+    return send_file(out, mimetype="application/pdf", as_attachment=False, download_name=filename)
+
+
+@app.get("/api/health")
+def health() -> Response:
+    return jsonify({"ok": True, "module": "Mebel360 Boshqaruv Pro V9", "customer_updates": True, "roles": list(ROLE_LABELS)})
+
+
+@app.errorhandler(400)
+def bad_request(error: Exception) -> tuple[str, int]:
+    description = getattr(error, "description", "So'rov noto'g'ri")
+    return f"Xato: {description}", 400
+
+
+@app.errorhandler(410)
+def link_expired(_: Exception) -> tuple[str, int]:
+    return "Bu maxfiy havola bekor qilingan. Rahbardan yangi havola oling.", 410
 
 
-@app.route('/ishchi/topshiriq/<int:tid>', methods=['POST'])
-def worker_task_update(tid):
-    wid=session.get('worker_id')
-    progress=max(0,min(100,int(request.form.get('progress') or 0)))
-    status=request.form.get('holat','Jarayonda')
-    c=get_db(); c.execute('UPDATE ishchi_topshiriqlari SET progress=?,holat=? WHERE id=? AND ishchi_id=?',(progress,status,tid,wid)); c.commit(); c.close()
-    return redirect(url_for('worker_dashboard'))
+@app.errorhandler(413)
+def too_large(_: Exception) -> tuple[str, int]:
+    return "Yuklanayotgan fayl ruxsat etilgan hajmdan katta", 413
 
 
-@app.route('/ishchi-boshqaruv', methods=['GET','POST'])
-def worker_admin():
-    c=get_db()
-    if request.method=='POST':
-        action=request.form.get('action')
-        if action=='approve':
-            aid=int(request.form['account_id']); c.execute('UPDATE ishchi_akkauntlari SET admin_tasdiq=1 WHERE id=?',(aid,)); log_action('worker_approved', f'account_id={aid}')
-        elif action=='block':
-            aid=int(request.form['account_id']); c.execute('UPDATE ishchi_akkauntlari SET faol=0 WHERE id=?',(aid,)); log_action('worker_blocked', f'account_id={aid}')
-        elif action=='task':
-            c.execute('''INSERT INTO ishchi_topshiriqlari(ishchi_id,buyurtma_kodi,ish_turi,tavsif,holat,progress,sana,tugash_sana)
-                         VALUES(?,?,?,?,?,?,?,?)''',(
-                int(request.form['ishchi_id']),request.form.get('buyurtma_kodi','').strip(),request.form.get('ish_turi','').strip(),
-                request.form.get('tavsif','').strip(),'Yangi',0,request.form.get('sana') or _tashkent_today(),request.form.get('tugash_sana','')
-            ))
-        c.commit()
-    accounts=c.execute('''SELECT a.*,i.ism,i.familiya,i.lavozim FROM ishchi_akkauntlari a LEFT JOIN ishchilar i ON i.id=a.ishchi_id ORDER BY a.id DESC''').fetchall()
-    workers=c.execute('SELECT id,ism,familiya,lavozim FROM ishchilar WHERE faol=1 ORDER BY ism').fetchall()
-    worker_states=c.execute('''SELECT i.id,i.ism,i.familiya,i.lavozim,
-        CASE WHEN t.id IS NULL THEN 'Bo‘sh' ELSE 'Ishlayapti' END ish_holati,
-        COALESCE(t.buyurtma_kodi,'') buyurtma_kodi,
-        COALESCE(t.ish_turi,'') ish_turi,
-        COALESCE(t.boshlandi_vaqt,'') boshlandi_vaqt
-        FROM ishchilar i
-        LEFT JOIN ishchi_topshiriqlari t ON t.id=(
-            SELECT t2.id FROM ishchi_topshiriqlari t2
-            WHERE t2.ishchi_id=i.id AND t2.holat='Ishlayapti'
-            ORDER BY t2.id DESC LIMIT 1
-        )
-        WHERE i.faol=1 ORDER BY ish_holati DESC,i.ism''').fetchall()
-    tasks=c.execute('''SELECT t.*,i.ism,i.familiya FROM ishchi_topshiriqlari t JOIN ishchilar i ON i.id=t.ishchi_id ORDER BY t.id DESC LIMIT 100''').fetchall()
-    otp_rows=c.execute('SELECT telefon,created_at FROM ishchi_otp WHERE ishlatildi=0 ORDER BY id DESC LIMIT 20').fetchall()
-    c.close()
-    return render_template_string(WORKER_ADMIN_HTML,accounts=accounts,workers=workers,worker_states=worker_states,tasks=tasks,otp_rows=otp_rows,today=_tashkent_today())
-
-
-
-# ---------- SHOFYOR KABINETI ----------
-@app.route('/shofyor/royxat', methods=['GET','POST'])
-def driver_register():
-    error=''
-    msg=''
-    if request.method=='POST':
-        ism=request.form.get('ism','').strip()
-        familiya=request.form.get('familiya','').strip()
-        telefon=normalize_phone(request.form.get('telefon',''))
-        login=request.form.get('login','').strip()
-        password=request.form.get('password','')
-        if not ism or len(login)<3 or len(telefon)<10:
-            error='Ism, telefon va kamida 3 belgili login kiriting.'
-        elif _weak_password(password):
-            error='Parol kamida 8 belgidan iborat bo‘lib, harf va raqamni birga o‘z ichiga olishi kerak.'
-        else:
-            c=get_db()
-            if c.execute("SELECT 1 FROM shofyor_akkauntlari WHERE login=?",(login,)).fetchone():
-                error='Bu login band.'
-            elif c.execute("SELECT 1 FROM shofyor_akkauntlari WHERE telefon=?",(telefon,)).fetchone():
-                error='Bu telefon avval ro‘yxatdan o‘tgan.'
-            else:
-                worker=c.execute("SELECT id FROM ishchilar WHERE telefon=? AND faol=1",(telefon,)).fetchone()
-                if worker:
-                    wid=worker['id']
-                    c.execute("UPDATE ishchilar SET lavozim='Shofyor' WHERE id=?",(wid,))
-                else:
-                    cur=c.execute("INSERT INTO ishchilar(ism,familiya,telefon,lavozim) VALUES(?,?,?,'Shofyor')",
-                                  (ism,familiya,telefon))
-                    wid=cur.lastrowid
-                c.execute("INSERT INTO shofyor_akkauntlari(ishchi_id,login,parol_hash,telefon,faol,admin_tasdiq) VALUES(?,?,?,?,1,0)",
-                          (wid,login,generate_password_hash(password),telefon))
-                c.commit()
-                msg='Ro‘yxatdan o‘tdingiz. Endi rahbar tasdiqlaydi.'
-            c.close()
-    return render_template_string(DRIVER_REGISTER_HTML,error=error,msg=msg)
-
-@app.route('/shofyor/login', methods=['GET','POST'])
-def driver_login():
-    error=''
-    if request.method=='POST':
-        login=request.form.get('login','').strip()
-        password=request.form.get('password','')
-        locked, wait_sec = _is_login_locked('d:'+login)
-        if locked:
-            error=f'Juda ko‘p xato urinish. {wait_sec} soniyadan so‘ng qayta urinib ko‘ring.'
-        else:
-            c=get_db()
-            row=c.execute("SELECT a.*,i.ism,i.familiya FROM shofyor_akkauntlari a JOIN ishchilar i ON i.id=a.ishchi_id WHERE a.login=? AND a.faol=1",(login,)).fetchone()
-            c.close()
-            if not row or not check_password_hash(row['parol_hash'],password):
-                _register_failed_login('d:'+login)
-                error='Login yoki parol xato.'
-            elif not row['admin_tasdiq']:
-                error='Rahbar hali akkauntingizni tasdiqlamagan.'
-            else:
-                _clear_login_attempts('d:'+login)
-                session.clear()
-                session['driver_account_id']=row['id']
-                session['driver_id']=row['ishchi_id']
-                log_action('driver_login', f'login={login}')
-                return redirect(url_for('driver_dashboard'))
-    return render_template_string(DRIVER_LOGIN_HTML,error=error)
-
-@app.route('/shofyor/logout')
-def driver_logout():
-    session.clear()
-    return redirect(url_for('driver_login'))
-
-@app.route('/shofyor/kabinet')
-def driver_dashboard():
-    did=session.get('driver_id')
-    c=get_db()
-    driver=c.execute("SELECT * FROM ishchilar WHERE id=?",(did,)).fetchone()
-    deliveries=c.execute("SELECT y.*,b.kod,b.mijoz,b.telefon,b.manzil,b.mahsulot,b.lokatsiya,b.moljal,b.qavat,b.lift,b.katta_mashina,b.izoh buyurtma_izoh FROM yetkazishlar y JOIN buyurtmalar b ON b.id=y.buyurtma_id WHERE y.haydovchi_id=? ORDER BY CASE WHEN y.holat='Yetkazib berildi' THEN 1 ELSE 0 END,y.navbat,y.id DESC",(did,)).fetchall()
-    c.close()
-    return render_template_string(DRIVER_DASHBOARD_HTML,driver=driver,deliveries=deliveries)
-
-@app.route('/shofyor/yetkazish/<int:yid>')
-def driver_delivery_detail(yid):
-    did=session.get('driver_id')
-    c=get_db()
-    row=c.execute("SELECT y.*,b.kod,b.mijoz,b.telefon,b.manzil,b.mahsulot,b.lokatsiya,b.moljal,b.qavat,b.lift,b.katta_mashina,b.izoh buyurtma_izoh FROM yetkazishlar y JOIN buyurtmalar b ON b.id=y.buyurtma_id WHERE y.id=? AND y.haydovchi_id=?",(yid,did)).fetchone()
-    c.close()
-    if not row:
-        return 'Yetkazish topilmadi',404
-    return render_template_string(DRIVER_DETAIL_HTML,x=row)
-
-@app.route('/shofyor/yetkazish/<int:yid>/holat', methods=['POST'])
-def driver_delivery_status(yid):
-    did=session.get('driver_id')
-    action=request.form.get('action','')
-    now=_tashkent_now().strftime('%Y-%m-%d %H:%M')
-    mapping={'yolga':('Yo‘lga chiqdi','yolga_chiqdi'),'yetib':('Yetib keldi','yetib_keldi'),'yetkazildi':('Yetkazib berildi','yetkazildi')}
-    if action not in mapping:
-        return redirect(url_for('driver_delivery_detail',yid=yid))
-    status,col=mapping[action]
-    c=get_db()
-    c.execute(f"UPDATE yetkazishlar SET holat=?, {col}=? WHERE id=? AND haydovchi_id=?",(status,now,yid,did))
-    c.commit(); c.close()
-    return redirect(url_for('driver_delivery_detail',yid=yid))
-
-@app.route('/shofyor-boshqaruv', methods=['GET','POST'])
-def driver_admin():
-    c=get_db()
-    msg=''
-    if request.method=='POST':
-        action=request.form.get('action')
-        try:
-            if action=='account':
-                wid=int(request.form['ishchi_id'])
-                login=request.form.get('login','').strip()
-                password=request.form.get('password','')
-                if _weak_password(password):
-                    msg='Xato: parol kamida 8 belgidan iborat bo‘lib, harf va raqamni birga o‘z ichiga olishi kerak.'
-                else:
-                    existing=c.execute("SELECT id FROM shofyor_akkauntlari WHERE ishchi_id=?",(wid,)).fetchone()
-                    if existing:
-                        c.execute("UPDATE shofyor_akkauntlari SET login=?,parol_hash=?,faol=1,admin_tasdiq=1 WHERE ishchi_id=?",(login,generate_password_hash(password),wid))
-                    else:
-                        c.execute("INSERT INTO shofyor_akkauntlari(ishchi_id,login,parol_hash,faol,admin_tasdiq) VALUES(?,?,?,1,1)",(wid,login,generate_password_hash(password)))
-                    msg='Shofyor akkaunti saqlandi.'
-                    log_action('driver_account_set', f'ishchi_id={wid},login={login}')
-            elif action=='approve_driver':
-                aid=int(request.form['account_id'])
-                c.execute("UPDATE shofyor_akkauntlari SET admin_tasdiq=1,faol=1 WHERE id=?",(aid,))
-                log_action('driver_approved', f'account_id={aid}')
-                msg='Shofyor tasdiqlandi.'
-            elif action=='block_driver':
-                aid=int(request.form['account_id'])
-                c.execute("UPDATE shofyor_akkauntlari SET faol=0 WHERE id=?",(aid,))
-                log_action('driver_blocked', f'account_id={aid}')
-                msg='Shofyor bloklandi.'
-            elif action=='delivery':
-                c.execute("INSERT INTO yetkazishlar(buyurtma_id,haydovchi_id,sana,qadoq_soni,navbat,izoh) VALUES(?,?,?,?,?,?)",(int(request.form['buyurtma_id']),int(request.form['shofyor_id']),_tashkent_today(),int(request.form.get('qadoq_soni') or 1),int(request.form.get('navbat') or 1),request.form.get('izoh','')))
-                log_action('delivery_assigned', f"buyurtma_id={request.form['buyurtma_id']},shofyor_id={request.form['shofyor_id']}")
-                msg='Yetkazish shofyorga biriktirildi.'
-            c.commit()
-        except Exception as e:
-            c.rollback()
-            msg='Xato: '+str(e)
-    drivers=c.execute("SELECT id,ism,familiya,lavozim FROM ishchilar WHERE faol=1 AND (lower(lavozim) LIKE '%shof%' OR lower(lavozim) LIKE '%haydov%') ORDER BY ism").fetchall()
-    orders=c.execute("SELECT id,kod,mijoz,mahsulot FROM buyurtmalar WHERE holat!='Yetkazildi' ORDER BY id DESC").fetchall()
-    assigned=c.execute("SELECT y.*,b.kod,b.mahsulot,i.ism,i.familiya FROM yetkazishlar y JOIN buyurtmalar b ON b.id=y.buyurtma_id JOIN ishchilar i ON i.id=y.haydovchi_id ORDER BY y.id DESC LIMIT 100").fetchall()
-    driver_accounts=c.execute("SELECT a.*,i.ism,i.familiya FROM shofyor_akkauntlari a JOIN ishchilar i ON i.id=a.ishchi_id ORDER BY a.id DESC").fetchall()
-    c.close()
-    return render_template_string(DRIVER_ADMIN_HTML,drivers=drivers,orders=orders,assigned=assigned,driver_accounts=driver_accounts,msg=msg)
-
-
-
-
-
-@app.route("/pro-boshqaruv")
-def pro_admin_page():
-    c=get_db()
-    stats={
-        "orders":c.execute("SELECT COUNT(*) FROM buyurtmalar").fetchone()[0],
-        "services":c.execute("SELECT COUNT(*) FROM servis_murojaatlari WHERE holat!='Yopildi'").fetchone()[0],
-        "ratings":c.execute("SELECT COUNT(*) FROM baholar").fetchone()[0],
-        "messages":c.execute("SELECT COUNT(*) FROM tizim_xabarlari WHERE oqildi=0").fetchone()[0],
-        "reservations":c.execute("SELECT COUNT(*) FROM ombor_rezervlari WHERE holat='Rezerv'").fetchone()[0]
-    }
-    orders=c.execute("SELECT id,kod,mijoz,mahsulot,holat,umumiy_narx,oldindan_tolov FROM buyurtmalar ORDER BY id DESC LIMIT 30").fetchall()
-    c.close()
-    return render_template_string(PRO_ADMIN_HTML,stats=stats,orders=orders)
-
-
-# ---------- MENEJER VA KONSTRUKTOR KABINETLARI ----------
-def _staff_account(login, role):
-    c = get_db()
-    row = c.execute(
-        "SELECT * FROM xodim_akkauntlari WHERE login=? AND rol=? LIMIT 1",
-        ((login or "").strip(), role),
-    ).fetchone()
-    c.close()
-    return row
-
-
-def _staff_login(role, role_label, home_endpoint):
-    error = ""
-    if request.method == "POST":
-        login_value = (request.form.get("login") or "").strip()
-        password = request.form.get("password") or ""
-        lock_key = f"staff:{role}:{login_value}"
-        locked, wait_sec = _is_login_locked(lock_key)
-        account = _staff_account(login_value, role)
-        if locked:
-            minutes = max(1, (wait_sec + 59) // 60)
-            error = f"Juda ko‘p xato urinish. Taxminan {minutes} daqiqadan so‘ng qayta urinib ko‘ring."
-        elif account and int(account["faol"] or 0) == 1 and check_password_hash(account["parol_hash"], password):
-            _clear_login_attempts(lock_key)
-            session.clear()
-            session["staff_account_id"] = account["id"]
-            session["staff_role"] = role
-            session["staff_name"] = account["ism"]
-            session["staff_login"] = account["login"]
-            log_action(f"{role}_login", f"login={account['login']}")
-            return redirect(url_for(home_endpoint))
-        else:
-            _register_failed_login(lock_key)
-            error = "Login yoki parol xato."
-    return render_template_string(
-        STAFF_LOGIN_HTML,
-        error=error,
-        role_label=role_label,
-        role=role,
-        icon="🧑‍💼" if role == "menejer" else "📐",
-    )
-
-
-@app.route('/menejer/login', methods=['GET', 'POST'])
-def manager_login():
-    return _staff_login('menejer', 'Menejer', 'manager_dashboard')
-
-
-@app.route('/menejer/logout')
-def manager_logout():
-    log_action('menejer_logout', f"login={session.get('staff_login', '')}")
-    session.clear()
-    return redirect(url_for('manager_login'))
-
-
-@app.route('/konstruktor/login', methods=['GET', 'POST'])
-def constructor_login():
-    return _staff_login('konstruktor', 'Konstruktor', 'constructor_dashboard')
-
-
-@app.route('/konstruktor/logout')
-def constructor_logout():
-    log_action('konstruktor_logout', f"login={session.get('staff_login', '')}")
-    session.clear()
-    return redirect(url_for('constructor_login'))
-
-
-@app.route('/xodim-akkauntlari', methods=['GET', 'POST'])
-def staff_accounts_admin():
-    msg = ""
-    c = get_db()
-    if request.method == 'POST':
-        action = request.form.get('action', 'save')
-        try:
-            if action == 'save':
-                ism = (request.form.get('ism') or '').strip()
-                login_value = (request.form.get('login') or '').strip()
-                role = request.form.get('rol') or ''
-                password = request.form.get('password') or ''
-                if role not in {'menejer', 'konstruktor'}:
-                    raise ValueError('Rol noto‘g‘ri tanlandi.')
-                if len(ism) < 2 or len(login_value) < 3:
-                    raise ValueError('Ism va loginni to‘liq kiriting.')
-                if _weak_password(password):
-                    raise ValueError('Parol kamida 8 belgi bo‘lib, harf va raqamni birga o‘z ichiga olsin.')
-                existing = c.execute('SELECT id FROM xodim_akkauntlari WHERE login=?', (login_value,)).fetchone()
-                if existing:
-                    c.execute('''UPDATE xodim_akkauntlari
-                                 SET ism=?,parol_hash=?,rol=?,faol=1,updated_at=? WHERE id=?''',
-                              (ism, generate_password_hash(password), role,
-                               _tashkent_now().strftime('%Y-%m-%d %H:%M:%S'), existing['id']))
-                else:
-                    c.execute('''INSERT INTO xodim_akkauntlari(ism,login,parol_hash,rol,faol)
-                                 VALUES(?,?,?,?,1)''',
-                              (ism, login_value, generate_password_hash(password), role))
-                msg = 'Akkaunt saqlandi.'
-                log_action('staff_account_saved', f'login={login_value},role={role}')
-            elif action == 'toggle':
-                aid = int(request.form['account_id'])
-                c.execute('UPDATE xodim_akkauntlari SET faol=CASE WHEN faol=1 THEN 0 ELSE 1 END,updated_at=? WHERE id=?',
-                          (_tashkent_now().strftime('%Y-%m-%d %H:%M:%S'), aid))
-                msg = 'Akkaunt holati o‘zgartirildi.'
-                log_action('staff_account_toggled', f'id={aid}')
-            c.commit()
-        except Exception as e:
-            c.rollback()
-            msg = 'Xato: ' + str(e)
-    accounts = c.execute('SELECT * FROM xodim_akkauntlari ORDER BY rol,ism').fetchall()
-    c.close()
-    return render_template_string(STAFF_ADMIN_HTML, accounts=accounts, msg=msg)
-
-
-@app.route('/menejer/kabinet', methods=['GET', 'POST'])
-def manager_dashboard():
-    c = get_db()
-    if request.method == 'POST':
-        action = request.form.get('action', '')
-        try:
-            if action == 'add_order':
-                code = (request.form.get('kod') or '').strip()
-                customer = (request.form.get('mijoz') or '').strip()
-                if not code or not customer:
-                    raise ValueError('Buyurtma kodi va mijoz ismi majburiy.')
-                cur = c.execute('''INSERT INTO buyurtmalar(
-                    kod,mijoz,telefon,manzil,mahsulot,umumiy_narx,oldindan_tolov,
-                    boshlanish_sana,tugash_sana,taxminiy_sana,holat,izoh,
-                    tracking_token,masul_xodim,material,rang)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                    (code, customer, request.form.get('telefon',''), request.form.get('manzil',''),
-                     request.form.get('mahsulot',''), float(request.form.get('umumiy_narx') or 0),
-                     float(request.form.get('oldindan_tolov') or 0), request.form.get('boshlanish_sana',''),
-                     request.form.get('tugash_sana',''), request.form.get('taxminiy_sana',''),
-                     request.form.get('holat','Yangi'), request.form.get('izoh',''),
-                     secrets.token_urlsafe(8), session.get('staff_name','Menejer'),
-                     request.form.get('material',''), request.form.get('rang','')))
-                order_id = cur.lastrowid
-                c.executemany('INSERT INTO buyurtma_bosqichlari(buyurtma_id,bosqich) VALUES(?,?)',
-                              [(order_id, stage) for stage in STAGES])
-                c.commit()
-                try:
-                    generate_order_contract(order_id)
-                except Exception:
-                    pass
-                log_action('manager_order_added', f'order_id={order_id},code={code}')
-                flash('✅ Yangi buyurtma saqlandi.')
-            elif action == 'payment':
-                order_id = int(request.form['buyurtma_id'])
-                amount = float(request.form.get('miqdor') or 0)
-                if amount <= 0:
-                    raise ValueError('To‘lov summasi 0 dan katta bo‘lsin.')
-                c.execute('INSERT INTO buyurtma_tolovlari(buyurtma_id,sana,miqdor,turi,izoh) VALUES(?,?,?,?,?)',
-                          (order_id, request.form.get('sana') or _tashkent_now().date().isoformat(),
-                           amount, request.form.get('turi','To‘lov'), request.form.get('izoh','')))
-                c.execute('UPDATE buyurtmalar SET oldindan_tolov=oldindan_tolov+? WHERE id=?', (amount, order_id))
-                c.commit()
-                log_action('manager_payment_added', f'order_id={order_id},amount={amount}')
-                flash('✅ To‘lov qo‘shildi.')
-            elif action == 'status':
-                order_id = int(request.form['buyurtma_id'])
-                status = request.form.get('holat') or 'Yangi'
-                allowed = {'Yangi','Jarayonda','Tayyor','Yetkazishga tayyor','Yetkazildi','Yopildi'}
-                if status not in allowed:
-                    raise ValueError('Holat noto‘g‘ri.')
-                c.execute('UPDATE buyurtmalar SET holat=? WHERE id=?', (status, order_id))
-                c.commit()
-                log_action('manager_order_status', f'order_id={order_id},status={status}')
-                flash('✅ Buyurtma holati yangilandi.')
-            else:
-                raise ValueError('Noma’lum amal.')
-        except Exception as e:
-            c.rollback()
-            flash('❌ ' + str(e))
-        c.close()
-        return redirect(url_for('manager_dashboard'))
-
-    orders = c.execute('''SELECT b.*,
-        ROUND(MAX(0,b.umumiy_narx-b.oldindan_tolov),2) qoldiq,
-        COALESCE(ROUND(100.0*SUM(CASE WHEN bs.bajarildi=1 THEN 1 ELSE 0 END)/NULLIF(COUNT(bs.id),0),1),0) progress
-        FROM buyurtmalar b LEFT JOIN buyurtma_bosqichlari bs ON bs.buyurtma_id=b.id
-        GROUP BY b.id ORDER BY b.id DESC LIMIT 200''').fetchall()
-    stats = c.execute('''SELECT COUNT(*) jami,
-        SUM(CASE WHEN holat NOT IN ('Yetkazildi','Yopildi') THEN 1 ELSE 0 END) faol,
-        COALESCE(SUM(umumiy_narx),0) summa,
-        COALESCE(SUM(oldindan_tolov),0) tushum FROM buyurtmalar''').fetchone()
-    c.close()
-    return render_template_string(MANAGER_DASHBOARD_HTML, orders=orders, stats=stats,
-                                  today=_tashkent_now().date().isoformat(), staff_name=session.get('staff_name','Menejer'))
-
-
-CONSTRUCTOR_ALLOWED_EXTENSIONS = {
-    'sto','dxf','dwg','skp','art','nc','cnc','tap','mpr','pdf','txt','csv','xlsx','zip','rar','7z','jpg','jpeg','png','webp'
-}
-
-
-@app.route('/konstruktor/kabinet', methods=['GET', 'POST'])
-def constructor_dashboard():
-    c = get_db()
-    selected_id = request.args.get('order_id', type=int)
-    if request.method == 'POST':
-        action = request.form.get('action', '')
-        selected_id = request.form.get('order_id', type=int)
-        try:
-            if action == 'stage':
-                stage_id = int(request.form['stage_id'])
-                done = 1 if request.form.get('bajarildi') == '1' else 0
-                now_text = _tashkent_now().strftime('%Y-%m-%d %H:%M:%S')
-                previous = c.execute('SELECT * FROM buyurtma_bosqichlari WHERE id=?',(stage_id,)).fetchone()
-                c.execute('''UPDATE buyurtma_bosqichlari SET bajarildi=?,
-                    boshlanish_vaqti=CASE WHEN ?=1 AND COALESCE(boshlanish_vaqti,'')='' THEN ? ELSE boshlanish_vaqti END,
-                    tugash_vaqti=CASE WHEN ?=1 THEN ? ELSE '' END,
-                    ishchi=?,izoh=? WHERE id=?''',
-                    (done, done, now_text, done, now_text, session.get('staff_name','Konstruktor'),
-                     request.form.get('izoh',''), stage_id))
-                if done and previous and not int(previous['bajarildi'] or 0):
-                    order = c.execute('SELECT * FROM buyurtmalar WHERE id=?',(previous['buyurtma_id'],)).fetchone()
-                    if order:
-                        _customer_progress_message(
-                            c, order, previous['bosqich'], session.get('staff_name','Konstruktor'), now_text,
-                            note=request.form.get('izoh','') or 'Konstruktor kabinetidan bosqich yakunlandi.'
-                        )
-                        c.execute("UPDATE buyurtmalar SET holat=CASE WHEN holat='Yangi' THEN 'Jarayonda' ELSE holat END WHERE id=?",(order['id'],))
-                flash('✅ Bosqich yangilandi. Mijoz kuzatuv sahifasi ham yangilandi.' if done else '✅ Bosqich yangilandi.')
-                log_action('constructor_stage_updated', f'stage_id={stage_id},done={done}')
-            elif action == 'upload':
-                if not selected_id:
-                    raise ValueError('Buyurtmani tanlang.')
-                uploaded = request.files.get('fayl')
-                if not uploaded or not uploaded.filename:
-                    raise ValueError('Fayl tanlanmagan.')
-                original = secure_filename(uploaded.filename)
-                if not original or '.' not in original:
-                    raise ValueError('Fayl nomi yoki turi noto‘g‘ri.')
-                ext = original.rsplit('.', 1)[1].lower()
-                if ext not in CONSTRUCTOR_ALLOWED_EXTENSIONS:
-                    raise ValueError('Bu turdagi faylga ruxsat berilmagan.')
-                stored = f"{selected_id}_{_tashkent_now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(3)}_{original}"
-                uploaded.save(os.path.join(CONSTRUCTOR_UPLOAD_DIR, stored))
-                c.execute('INSERT INTO buyurtma_hujjatlari(buyurtma_id,nomi,fayl_nomi) VALUES(?,?,?)',
-                          (selected_id, request.form.get('nomi') or original, stored))
-                flash('✅ Konstruktor fayli yuklandi.')
-                log_action('constructor_file_uploaded', f'order_id={selected_id},file={stored}')
-            elif action == 'order_status':
-                status = request.form.get('holat') or 'Jarayonda'
-                c.execute('UPDATE buyurtmalar SET holat=? WHERE id=?', (status, selected_id))
-                flash('✅ Buyurtma holati yangilandi.')
-            else:
-                raise ValueError('Noma’lum amal.')
-            c.commit()
-        except Exception as e:
-            c.rollback()
-            flash('❌ ' + str(e))
-        c.close()
-        return redirect(url_for('constructor_dashboard', order_id=selected_id or ''))
-
-    orders = c.execute('''SELECT b.*,
-        COALESCE(ROUND(100.0*SUM(CASE WHEN bs.bajarildi=1 THEN 1 ELSE 0 END)/NULLIF(COUNT(bs.id),0),1),0) progress
-        FROM buyurtmalar b LEFT JOIN buyurtma_bosqichlari bs ON bs.buyurtma_id=b.id
-        GROUP BY b.id ORDER BY b.id DESC LIMIT 200''').fetchall()
-    if not selected_id and orders:
-        selected_id = orders[0]['id']
-    selected_order = None
-    stages = []
-    files = []
-    if selected_id:
-        selected_order = c.execute('SELECT * FROM buyurtmalar WHERE id=?', (selected_id,)).fetchone()
-        stages = c.execute('SELECT * FROM buyurtma_bosqichlari WHERE buyurtma_id=? ORDER BY id', (selected_id,)).fetchall()
-        files = c.execute('SELECT * FROM buyurtma_hujjatlari WHERE buyurtma_id=? ORDER BY id DESC', (selected_id,)).fetchall()
-    c.close()
-    return render_template_string(CONSTRUCTOR_DASHBOARD_HTML, orders=orders, selected_order=selected_order,
-                                  stages=stages, files=files, staff_name=session.get('staff_name','Konstruktor'))
-
-
-@app.route('/konstruktor/fayl/<path:filename>')
-def constructor_file_download(filename):
-    return send_from_directory(CONSTRUCTOR_UPLOAD_DIR, filename, as_attachment=True)
-
-
-STAFF_LOGIN_HTML = r"""
-<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Mebel360° — {{role_label}} kirishi</title><style>
-:root{--accent:{{'#2563eb' if role=='menejer' else '#7c3aed'}};--accent2:{{'#0891b2' if role=='menejer' else '#db2777'}};--ink:#0f172a;--muted:#64748b}*{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(circle at 10% 10%,{{'#dbeafe' if role=='menejer' else '#ede9fe'}},transparent 30%),radial-gradient(circle at 90% 90%,{{'#cffafe' if role=='menejer' else '#fce7f3'}},transparent 30%),#f7f9fc;display:grid;place-items:center;padding:18px}.shell{width:min(980px,100%);display:grid;grid-template-columns:1.08fr .92fr;background:#fff;border:1px solid #e2e8f0;border-radius:28px;overflow:hidden;box-shadow:0 28px 85px #0f172a22}.visual{position:relative;overflow:hidden;background:linear-gradient(145deg,#0f172a,var(--accent) 62%,var(--accent2));color:#fff;padding:46px;min-height:570px;display:flex;flex-direction:column;justify-content:space-between}.visual:before,.visual:after{content:"";position:absolute;border-radius:50%;background:#ffffff10}.visual:before{width:330px;height:330px;right:-130px;top:-130px}.visual:after{width:220px;height:220px;left:-100px;bottom:-100px}.logo{position:relative;z-index:1;display:flex;align-items:center;gap:12px;font-size:20px;font-weight:900}.logo-mark{width:48px;height:48px;border-radius:15px;background:#fff;color:var(--accent);display:grid;place-items:center;font-size:25px;box-shadow:0 10px 30px #0003}.visual-copy{position:relative;z-index:1}.visual h1{font-size:38px;line-height:1.08;margin:0 0 14px}.visual p{color:#e2e8f0;line-height:1.6;max-width:460px}.feature{display:flex;gap:10px;align-items:center;margin-top:11px;color:#f8fafc}.tick{width:26px;height:26px;border-radius:9px;background:#ffffff1c;display:grid;place-items:center}.form-side{padding:46px;display:flex;align-items:center}.form{width:100%;max-width:390px;margin:auto}.role-icon{width:64px;height:64px;border-radius:20px;background:linear-gradient(145deg,{{'#dbeafe' if role=='menejer' else '#ede9fe'}},#fff);display:grid;place-items:center;font-size:31px;box-shadow:inset 0 0 0 1px #e2e8f0}.form h2{font-size:29px;margin:17px 0 7px;color:var(--ink)}.muted{color:var(--muted);font-size:14px;line-height:1.55;margin-bottom:22px}label{display:block;font-weight:800;font-size:13px;margin:14px 0 7px;color:#334155}.input-wrap{position:relative}input{width:100%;height:52px;border:1px solid #cbd5e1;border-radius:13px;padding:0 14px;font-size:15px;background:#fbfdff;transition:.16s}input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 15%,transparent);background:#fff}.eye{position:absolute;right:8px;top:7px;width:38px;height:38px;border:0;border-radius:10px;background:#f1f5f9;color:#475569;cursor:pointer}.submit{width:100%;height:52px;border:0;border-radius:13px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-weight:900;font-size:15px;margin-top:21px;cursor:pointer;box-shadow:0 10px 24px color-mix(in srgb,var(--accent) 28%,transparent)}.err{margin-top:13px;color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;padding:11px;border-radius:11px}.links{display:flex;justify-content:space-between;gap:10px;margin-top:20px;font-size:13px}.links a{color:var(--accent);text-decoration:none;font-weight:800}@media(max-width:760px){.shell{grid-template-columns:1fr;border-radius:20px}.visual{min-height:auto;padding:26px}.visual h1{font-size:29px}.feature{display:none}.form-side{padding:27px 22px}.logo{margin-bottom:35px}}
-</style></head><body><main class="shell"><section class="visual"><div class="logo"><span class="logo-mark">360°</span> PHARM MEBEL</div><div class="visual-copy"><h1>{{role_label}} kabineti</h1><p>Mebel360° tizimida buyurtmalar va vazifalarni tartibli, tez va xavfsiz boshqaring.</p><div class="feature"><span class="tick">✓</span>Faqat ruxsat berilgan bo‘limlar</div><div class="feature"><span class="tick">✓</span>Toshkent vaqti bo‘yicha aniq tarix</div><div class="feature"><span class="tick">✓</span>Har bir o‘zgarish tizimda saqlanadi</div></div></section><section class="form-side"><form class="form" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><div class="role-icon">{{icon}}</div><h2>Xush kelibsiz</h2><p class="muted">{{role_label}} kabinetiga kirish uchun login va parolingizni yozing.</p><label>Login</label><input name="login" required autofocus autocomplete="username" placeholder="Loginni kiriting"><label>Parol</label><div class="input-wrap"><input id="staffPassword" name="password" type="password" required autocomplete="current-password" placeholder="Parolni kiriting"><button class="eye" type="button" onclick="toggleStaffPassword()" aria-label="Parolni ko‘rsatish">👁</button></div><button class="submit">Kabinetga kirish →</button>{% if error %}<div class="err">⚠ {{error}}</div>{% endif %}<div class="links"><a href="/login">← Rahbar kirishi</a>{% if role=='menejer' %}<a href="/konstruktor/login">Konstruktor</a>{% else %}<a href="/menejer/login">Menejer</a>{% endif %}</div></form></section></main><script>function toggleStaffPassword(){const p=document.getElementById('staffPassword');p.type=p.type==='password'?'text':'password'}</script></body></html>
-"""
-
-STAFF_ADMIN_HTML = r"""
-<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Menejer va Konstruktor akkauntlari</title>
-<style>*{box-sizing:border-box}body{margin:0;font-family:Arial;background:#eef3f8;color:#172033}.head{background:linear-gradient(135deg,#0f1b33,#2563eb);color:#fff;padding:18px}.wrap{max-width:1100px;margin:auto;padding:16px}.box{background:#fff;border-radius:16px;padding:18px;box-shadow:0 8px 24px #0f172a18;margin-bottom:14px}.grid{display:grid;grid-template-columns:360px 1fr;gap:14px}input,select{width:100%;padding:11px;border:1px solid #cbd5e1;border-radius:9px;margin:6px 0 11px}button,.btn{border:0;border-radius:9px;padding:10px 14px;background:#2563eb;color:#fff;font-weight:800;text-decoration:none;cursor:pointer}.red{background:#dc2626}.green{background:#16a34a}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #e5e7eb;text-align:left}.msg{padding:10px;border-radius:10px;background:#eff6ff;color:#1d4ed8;margin-bottom:12px}@media(max-width:800px){.grid{grid-template-columns:1fr}.box{overflow:auto}}</style></head><body><div class="head"><div class="wrap" style="padding:0"><b>🔐 Menejer va Konstruktor akkauntlari</b><a class="btn" style="float:right" href="/dashboard">Bosh sahifa</a></div></div><div class="wrap">{% if msg %}<div class="msg">{{msg}}</div>{% endif %}<div class="grid"><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="save"><h3>Akkaunt yaratish yoki parolni yangilash</h3><label>Ism</label><input name="ism" required><label>Login</label><input name="login" required minlength="3"><label>Rol</label><select name="rol"><option value="menejer">Menejer</option><option value="konstruktor">Konstruktor</option></select><label>Parol</label><input name="password" type="password" minlength="8" required><button>Saqlash</button></form><div class="box"><h3>Mavjud akkauntlar</h3><table><tr><th>Ism</th><th>Login</th><th>Rol</th><th>Holat</th><th>Amal</th></tr>{% for a in accounts %}<tr><td>{{a['ism']}}</td><td>{{a['login']}}</td><td>{{'Menejer' if a['rol']=='menejer' else 'Konstruktor'}}</td><td>{{'Faol' if a['faol'] else 'Bloklangan'}}</td><td><form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="toggle"><input type="hidden" name="account_id" value="{{a['id']}}"><button class="{{'red' if a['faol'] else 'green'}}">{{'Bloklash' if a['faol'] else 'Faollashtirish'}}</button></form></td></tr>{% else %}<tr><td colspan="5">Hali akkaunt yaratilmagan.</td></tr>{% endfor %}</table></div></div></div></body></html>
-"""
-
-MANAGER_DASHBOARD_HTML = r"""
-<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Menejer kabineti</title>
-<style>*{box-sizing:border-box}body{margin:0;font-family:Arial;background:#eef3f8;color:#172033}.head{background:linear-gradient(135deg,#0f1b33,#2563eb);color:#fff;padding:18px}.wrap{max-width:1250px;margin:auto;padding:16px}.box,.card{background:#fff;border-radius:16px;padding:17px;box-shadow:0 8px 24px #0f172a18;margin-bottom:14px}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.card b{font-size:25px;color:#2563eb}.grid{display:grid;grid-template-columns:370px 1fr;gap:14px}input,select,textarea{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:9px;margin:5px 0 10px}button,.btn{border:0;border-radius:9px;padding:10px 13px;background:#2563eb;color:#fff;font-weight:800;text-decoration:none;cursor:pointer}.red{background:#dc2626}.green{background:#16a34a}table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px;border-bottom:1px solid #e5e7eb;text-align:left;vertical-align:top}.progress{height:8px;background:#e2e8f0;border-radius:10px;overflow:hidden;min-width:90px}.progress i{display:block;height:100%;background:#16a34a}.messages{padding:10px;border-radius:10px;background:#eff6ff;color:#1d4ed8;margin-bottom:12px}@media(max-width:900px){.grid{grid-template-columns:1fr}.cards{grid-template-columns:1fr 1fr}.table{overflow:auto}}@media(max-width:500px){.cards{grid-template-columns:1fr}}</style></head><body><div class="head"><div class="wrap" style="padding:0"><b>🧑‍💼 Menejer: {{staff_name}}</b><a class="btn red" style="float:right" href="/menejer/logout">Chiqish</a></div></div><div class="wrap">{% with messages=get_flashed_messages() %}{% if messages %}<div class="messages">{{messages[0]}}</div>{% endif %}{% endwith %}<div class="cards"><div class="card"><span>JAMI BUYURTMA</span><br><b>{{stats['jami'] or 0}}</b></div><div class="card"><span>FAOL</span><br><b>{{stats['faol'] or 0}}</b></div><div class="card"><span>JAMI SUMMA</span><br><b>{{'{:,.0f}'.format(stats['summa'] or 0)}}</b></div><div class="card"><span>TUSHUM</span><br><b>{{'{:,.0f}'.format(stats['tushum'] or 0)}}</b></div></div><div class="grid"><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="add_order"><h3>Yangi buyurtma</h3><label>Kod</label><input name="kod" placeholder="AB-001" required><label>Mijoz</label><input name="mijoz" required><label>Telefon</label><input name="telefon"><label>Manzil</label><input name="manzil"><label>Mahsulot</label><input name="mahsulot"><label>Material</label><input name="material"><label>Rang</label><input name="rang"><label>Umumiy narx</label><input type="number" name="umumiy_narx" value="0"><label>Avans</label><input type="number" name="oldindan_tolov" value="0"><label>Boshlanish</label><input type="date" name="boshlanish_sana" value="{{today}}"><label>Tugash</label><input type="date" name="tugash_sana"><label>Taxminiy tayyor</label><input type="date" name="taxminiy_sana"><label>Izoh</label><textarea name="izoh"></textarea><button>Buyurtmani saqlash</button></form><div class="box table"><h3>Buyurtmalar</h3><table><tr><th>Kod / mijoz</th><th>Mahsulot</th><th>Summa / qoldiq</th><th>Jarayon</th><th>Holat</th><th>To‘lov</th></tr>{% for o in orders %}<tr><td><b>{{o['kod']}}</b><br>{{o['mijoz']}}<br><small>{{o['telefon']}}</small></td><td>{{o['mahsulot'] or '-'}}<br><small>{{o['material'] or ''}} {{o['rang'] or ''}}</small></td><td>{{'{:,.0f}'.format(o['umumiy_narx'] or 0)}}<br><b style="color:#dc2626">Qoldiq: {{'{:,.0f}'.format(o['qoldiq'] or 0)}}</b></td><td><div class="progress"><i style="width:{{o['progress']}}%"></i></div><small>{{o['progress']}}%</small></td><td><form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="status"><input type="hidden" name="buyurtma_id" value="{{o['id']}}"><select name="holat"><option selected>{{o['holat']}}</option><option>Yangi</option><option>Jarayonda</option><option>Tayyor</option><option>Yetkazishga tayyor</option><option>Yetkazildi</option><option>Yopildi</option></select><button class="green">Yangilash</button></form></td><td><form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="payment"><input type="hidden" name="buyurtma_id" value="{{o['id']}}"><input type="date" name="sana" value="{{today}}"><input type="number" name="miqdor" placeholder="Summa" required><input name="izoh" placeholder="Izoh"><button>Qo‘shish</button></form></td></tr>{% else %}<tr><td colspan="6">Buyurtma yo‘q.</td></tr>{% endfor %}</table></div></div></div></body></html>
-"""
-
-CONSTRUCTOR_DASHBOARD_HTML = r"""
-<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Konstruktor kabineti</title>
-<style>*{box-sizing:border-box}body{margin:0;font-family:Arial;background:#eef3f8;color:#172033}.head{background:linear-gradient(135deg,#0f1b33,#7c3aed);color:#fff;padding:18px}.wrap{max-width:1250px;margin:auto;padding:16px}.box,.card{background:#fff;border-radius:16px;padding:17px;box-shadow:0 8px 24px #0f172a18;margin-bottom:14px}.layout{display:grid;grid-template-columns:340px 1fr;gap:14px}.order{display:block;text-decoration:none;color:inherit;border-left:5px solid #7c3aed}.order.active{background:#f5f3ff}.progress{height:8px;background:#e2e8f0;border-radius:10px;overflow:hidden}.progress i{display:block;height:100%;background:#16a34a}input,select,textarea{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:9px;margin:5px 0 10px}button,.btn{border:0;border-radius:9px;padding:10px 13px;background:#7c3aed;color:#fff;font-weight:800;text-decoration:none;cursor:pointer}.red{background:#dc2626}.green{background:#16a34a}.stage{border:1px solid #e2e8f0;border-radius:12px;padding:12px;margin-bottom:9px}.stage.done{border-color:#86efac;background:#f0fdf4}.files a{color:#2563eb;font-weight:700}.messages{padding:10px;border-radius:10px;background:#f5f3ff;color:#6d28d9;margin-bottom:12px}@media(max-width:850px){.layout{grid-template-columns:1fr}}</style></head><body><div class="head"><div class="wrap" style="padding:0"><b>📐 Konstruktor: {{staff_name}}</b><a class="btn red" style="float:right" href="/konstruktor/logout">Chiqish</a></div></div><div class="wrap">{% with messages=get_flashed_messages() %}{% if messages %}<div class="messages">{{messages[0]}}</div>{% endif %}{% endwith %}<div class="layout"><div>{% for o in orders %}<a class="card order {% if selected_order and selected_order['id']==o['id'] %}active{% endif %}" href="/konstruktor/kabinet?order_id={{o['id']}}"><b>{{o['kod']}} — {{o['mahsulot'] or 'Mahsulot'}}</b><p>{{o['mijoz']}}</p><div class="progress"><i style="width:{{o['progress']}}%"></i></div><small>{{o['progress']}}% · {{o['holat']}}</small></a>{% else %}<div class="card">Buyurtma yo‘q.</div>{% endfor %}</div><div>{% if selected_order %}<div class="box"><h2>{{selected_order['kod']}} — {{selected_order['mahsulot']}}</h2><p><b>Mijoz:</b> {{selected_order['mijoz']}} · <b>Material:</b> {{selected_order['material'] or '-'}} · <b>Rang:</b> {{selected_order['rang'] or '-'}}</p><p><b>O‘lcham:</b> {{selected_order['olcham'] or '-'}} · <b>Soni:</b> {{selected_order['soni'] or 1}}</p><form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="order_status"><input type="hidden" name="order_id" value="{{selected_order['id']}}"><label>Buyurtma holati</label><select name="holat"><option selected>{{selected_order['holat']}}</option><option>Chizma tayyorlanmoqda</option><option>Mijoz tasdiqlashi kutilmoqda</option><option>Material tayyorlanmoqda</option><option>Jarayonda</option><option>Tayyor</option></select><button>Holatni yangilash</button></form></div><div class="box"><h3>Chizma, kroy va CNC fayli</h3><form method="post" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="upload"><input type="hidden" name="order_id" value="{{selected_order['id']}}"><label>Fayl nomi/izohi</label><input name="nomi" placeholder="PRO100 chizma / CNC fayli"><label>Fayl</label><input type="file" name="fayl" required><button class="green">Faylni yuklash</button></form><div class="files">{% for f in files %}<p>📎 <a href="/konstruktor/fayl/{{f['fayl_nomi']}}">{{f['nomi']}}</a> <small>({{f['created_at']}})</small></p>{% else %}<p>Hali fayl yuklanmagan.</p>{% endfor %}</div></div><div class="box"><h3>Ishlab chiqarish bosqichlari</h3>{% for s in stages %}<form class="stage {% if s['bajarildi'] %}done{% endif %}" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="stage"><input type="hidden" name="order_id" value="{{selected_order['id']}}"><input type="hidden" name="stage_id" value="{{s['id']}}"><b>{{'✅' if s['bajarildi'] else '⬜'}} {{s['bosqich']}}</b><p><small>Boshlanish: {{s['boshlanish_vaqti'] or '-'}} · Tugash: {{s['tugash_vaqti'] or '-'}}</small></p><input name="izoh" value="{{s['izoh'] or ''}}" placeholder="Izoh"><select name="bajarildi"><option value="0" {% if not s['bajarildi'] %}selected{% endif %}>Jarayonda</option><option value="1" {% if s['bajarildi'] %}selected{% endif %}>Bajarildi</option></select><button>Saqlash</button></form>{% endfor %}</div>{% else %}<div class="box">Buyurtmani tanlang.</div>{% endif %}</div></div></div></body></html>
-"""
-
-
-ADMIN_SETUP_HTML = r"""
-<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pharm Mebel - Birinchi xavfsiz sozlash</title><style>body{margin:0;background:linear-gradient(135deg,#0f1b33,#16a34a);font-family:Arial;display:grid;place-items:center;min-height:100vh}.box{background:#fff;padding:28px;border-radius:18px;width:min(410px,92%);box-shadow:0 20px 50px #0005}h2{margin-top:0}input{width:100%;padding:12px;margin:8px 0;border:1px solid #cbd5e1;border-radius:9px;box-sizing:border-box}button{width:100%;padding:12px;border:0;border-radius:9px;background:#16a34a;color:#fff;font-weight:700}.err{color:#b91c1c;font-size:13px}.note{font-size:13px;color:#475569;line-height:1.45}</style></head><body><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><h2>🔐 Birinchi xavfsiz sozlash</h2><input name="user" placeholder="Admin login" value="admin" minlength="3" required><input name="password" type="password" placeholder="Yangi parol" minlength="8" required><input name="confirm" type="password" placeholder="Parolni takrorlang" minlength="8" required><button>Admin akkauntini yaratish</button><div class="err">{{error}}</div></form></body></html>
-"""
-
-LOGIN_HTML = r"""
-<!doctype html>
-<html lang="uz">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pharm Mebel — Rahbar kirishi</title>
-<style>
-:root{
-  --navy:#0b1736;
-  --blue:#2563eb;
-  --blue2:#38bdf8;
-  --green:#16a34a;
-  --text:#172033;
-  --muted:#64748b;
-  --line:#dbe5f0;
-  --danger:#b91c1c;
-}
-*{box-sizing:border-box}
-html,body{margin:0;min-height:100%;font-family:Arial,Helvetica,sans-serif;color:var(--text)}
-body{
-  min-height:100vh;
-  display:grid;
-  place-items:center;
-  padding:24px;
-  background:
-    radial-gradient(circle at 12% 16%,rgba(56,189,248,.28),transparent 31%),
-    radial-gradient(circle at 88% 82%,rgba(37,99,235,.30),transparent 34%),
-    linear-gradient(145deg,#07142f 0%,#123b8f 50%,#0b5fa8 100%);
-  overflow-x:hidden;
-}
-body:before,body:after{
-  content:"";position:fixed;border-radius:999px;filter:blur(2px);pointer-events:none;
-  background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12)
-}
-body:before{width:320px;height:320px;left:-100px;bottom:-120px}
-body:after{width:230px;height:230px;right:-65px;top:-60px}
-.login-shell{
-  width:min(900px,100%);
-  display:grid;
-  grid-template-columns:1.05fr .95fr;
-  border:1px solid rgba(255,255,255,.22);
-  border-radius:28px;
-  overflow:hidden;
-  background:rgba(255,255,255,.96);
-  box-shadow:0 32px 90px rgba(2,8,23,.38);
-  animation:show .55s ease both;
-}
-.brand-panel{
-  position:relative;
-  min-height:560px;
-  padding:48px 42px;
-  display:flex;
-  flex-direction:column;
-  justify-content:space-between;
-  color:#fff;
-  background:
-    radial-gradient(circle at 78% 20%,rgba(56,189,248,.34),transparent 30%),
-    linear-gradient(150deg,#0b1736,#154aa8 62%,#0784c8);
-  overflow:hidden;
-}
-.brand-panel:after{
-  content:"360°";
-  position:absolute;
-  right:-18px;
-  bottom:18px;
-  font-size:132px;
-  line-height:1;
-  font-weight:900;
-  color:rgba(255,255,255,.055);
-  letter-spacing:-10px;
-}
-.brand-top{position:relative;z-index:1}
-.logo-mark{
-  width:66px;height:66px;border-radius:20px;
-  display:grid;place-items:center;
-  background:linear-gradient(145deg,#fff,#dbeafe);
-  color:#154aa8;font-size:31px;font-weight:900;
-  box-shadow:0 15px 35px rgba(2,8,23,.25)
-}
-.brand-title{margin:28px 0 8px;font-size:42px;line-height:1.05;font-weight:900;letter-spacing:-1px}
-.brand-sub{font-size:18px;line-height:1.55;color:#dbeafe;max-width:390px}
-.brand-features{position:relative;z-index:1;display:grid;gap:11px;margin-top:28px}
-.feature{display:flex;align-items:center;gap:10px;font-size:14px;color:#e0f2fe}
-.feature i{width:27px;height:27px;border-radius:9px;display:grid;place-items:center;background:rgba(255,255,255,.13);font-style:normal}
-.form-panel{padding:48px 44px;display:flex;align-items:center;background:#fff}
-.form-wrap{width:100%;max-width:360px;margin:auto}
-.role-badge{display:inline-flex;align-items:center;gap:7px;padding:7px 11px;border-radius:999px;background:#eff6ff;color:#1d4ed8;font-size:12px;font-weight:800}
-h1{font-size:30px;margin:17px 0 7px;letter-spacing:-.5px}
-.intro{margin:0 0 25px;color:var(--muted);font-size:14px;line-height:1.5}
-label{display:block;margin:13px 0 6px;font-size:13px;font-weight:800;color:#334155}
-.field{position:relative}
-.field input{
-  width:100%;height:50px;padding:0 46px 0 43px;
-  border:1px solid var(--line);border-radius:13px;
-  background:#f8fafc;color:#0f172a;font-size:15px;outline:none;
-  transition:.18s ease;
-}
-.field input:focus{border-color:#60a5fa;background:#fff;box-shadow:0 0 0 4px rgba(37,99,235,.11)}
-.field-icon{position:absolute;left:15px;top:50%;transform:translateY(-50%);font-size:17px;opacity:.72}
-.show-pass{position:absolute;right:8px;top:50%;transform:translateY(-50%);border:0;background:transparent;color:#475569;font-size:12px;font-weight:800;padding:8px;cursor:pointer}
-.login-btn{
-  width:100%;height:51px;margin-top:20px;border:0;border-radius:13px;
-  color:#fff;font-size:15px;font-weight:900;cursor:pointer;
-  background:linear-gradient(100deg,#2563eb,#0284c7);
-  box-shadow:0 13px 28px rgba(37,99,235,.25);
-  transition:.18s ease;
-}
-.login-btn:hover{transform:translateY(-1px);box-shadow:0 16px 32px rgba(37,99,235,.30)}
-.login-btn:active{transform:translateY(0)}
-.error-box{margin-top:13px;padding:10px 12px;border-radius:10px;background:#fef2f2;color:var(--danger);font-size:13px;font-weight:700;border:1px solid #fecaca}
-.other-title{display:flex;align-items:center;gap:10px;margin:24px 0 13px;color:#94a3b8;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.8px}
-.other-title:before,.other-title:after{content:"";height:1px;background:#e2e8f0;flex:1}
-.role-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}
-.role-link{
-  min-height:67px;padding:10px;border:1px solid #e2e8f0;border-radius:13px;
-  text-decoration:none;color:#334155;background:#f8fafc;
-  display:flex;align-items:center;gap:9px;transition:.18s ease
-}
-.role-link:hover{border-color:#93c5fd;background:#eff6ff;transform:translateY(-1px)}
-.role-icon{width:35px;height:35px;border-radius:10px;display:grid;place-items:center;background:#dbeafe;font-size:17px;flex:none}
-.role-link.driver .role-icon{background:#dcfce7}
-.role-link b{display:block;font-size:12px}.role-link small{display:block;color:#64748b;font-size:10px;margin-top:3px}
-.creator-note{margin-top:20px;padding-top:16px;border-top:1px solid #e2e8f0;text-align:center;line-height:1.35}
-.creator-system{font-size:13px;font-weight:900;color:#334155;letter-spacing:.15px}
-.creator-name{margin-top:5px;font-size:12px;font-weight:900;color:#1d4ed8}
-.creator-story{max-width:330px;margin:5px auto 0;color:#7c8ca0;font-size:10.5px;line-height:1.45}
-@keyframes show{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
-@media(max-width:760px){
-  body{padding:13px;display:block}
-  .login-shell{grid-template-columns:1fr;max-width:480px;margin:12px auto;border-radius:22px}
-  .brand-panel{min-height:auto;padding:26px 25px 24px}
-  .brand-title{font-size:29px;margin-top:18px}.brand-sub{font-size:14px}
-  .brand-features{display:none}.brand-panel:after{font-size:85px;bottom:-5px}
-  .logo-mark{width:52px;height:52px;border-radius:16px;font-size:24px}
-  .form-panel{padding:29px 22px 25px}
-  h1{font-size:26px}.role-grid{grid-template-columns:1fr 1fr}
-}
-@media(max-width:390px){.role-grid{grid-template-columns:1fr}.role-link{min-height:58px}}
-</style>
-</head>
-<body>
-<main class="login-shell">
-  <section class="brand-panel">
-    <div class="brand-top">
-      <div class="logo-mark">M</div>
-      <div class="brand-title">Pharm Mebel</div>
-      <div class="brand-sub">Korxona, buyurtmalar, ishchilar va omborni yagona tizimda boshqaring.</div>
-    </div>
-    <div class="brand-features">
-      <div class="feature"><i>✓</i><span>Buyurtmalar va ishlab chiqarish nazorati</span></div>
-      <div class="feature"><i>✓</i><span>Menejer, Konstruktor, Ishchi va Shofyor kabinetlari</span></div>
-      <div class="feature"><i>✓</i><span>Ombor, xarajat va hisobotlar</span></div>
-    </div>
-  </section>
-
-  <section class="form-panel">
-    <form class="form-wrap" method="post">
-      <input type="hidden" name="csrf_token" value="{{csrf_token()}}">
-      <span class="role-badge">◆ Rahbar kabineti</span>
-      <h1>Xush kelibsiz</h1>
-      <p class="intro">Dastur boshqaruv paneliga kirish uchun login va parolingizni kiriting.</p>
-
-      <label for="user">Login</label>
-      <div class="field">
-        <span class="field-icon">👤</span>
-        <input id="user" name="user" placeholder="Login" value="admin" autocomplete="username" required autofocus>
-      </div>
-
-      <label for="password">Parol</label>
-      <div class="field">
-        <span class="field-icon">🔑</span>
-        <input id="password" name="password" type="password" placeholder="Parol" autocomplete="current-password" required>
-        <button class="show-pass" type="button" onclick="togglePassword()" id="showPassword">Ko‘rsatish</button>
-      </div>
-
-      <button class="login-btn" type="submit">Kirish →</button>
-      {% if error %}<div class="error-box">⚠ {{error}}</div>{% endif %}
-
-      <div class="other-title">Boshqa kabinetlar</div>
-      <div class="role-grid">
-        <a class="role-link" href="/menejer/login"><span class="role-icon">🧑‍💼</span><span><b>Menejer kirishi</b><small>Buyurtmalar va mijozlar</small></span></a>
-        <a class="role-link" href="/konstruktor/login"><span class="role-icon">📐</span><span><b>Konstruktor kirishi</b><small>Chizma, kroy va CNC</small></span></a>
-        <a class="role-link" href="/ishchi/login"><span class="role-icon">👷</span><span><b>Ishchi kirishi</b><small>Kabinetga kirish</small></span></a>
-        <a class="role-link" href="/ishchi/royxat"><span class="role-icon">＋</span><span><b>Ishchi ro‘yxati</b><small>Yangi akkaunt</small></span></a>
-        <a class="role-link driver" href="/shofyor/login"><span class="role-icon">🚚</span><span><b>Shofyor kirishi</b><small>Kabinetga kirish</small></span></a>
-        <a class="role-link driver" href="/shofyor/royxat"><span class="role-icon">＋</span><span><b>Shofyor ro‘yxati</b><small>Yangi akkaunt</small></span></a>
-      </div>
-      <div class="creator-note">
-        <div class="creator-system">Mebel360° boshqaruv tizimi</div>
-        <div class="creator-name">Zuhriddin Ubaydullayev</div>
-        <div class="creator-story">22 yillik amaliy tajriba va yo‘l qo‘yilgan xatolardan olingan saboqlar asosida shakllangan tizim</div>
-      </div>
-    </form>
-  </section>
-</main>
-<script>
-function togglePassword(){
-  const input=document.getElementById('password');
-  const button=document.getElementById('showPassword');
-  const visible=input.type==='text';
-  input.type=visible?'password':'text';
-  button.textContent=visible?'Ko‘rsatish':'Yashirish';
-}
-</script>
-</body>
-</html>
-"""
-
-
-WORKER_BASE_STYLE = """
-<style>
-*{box-sizing:border-box}body{margin:0;font-family:Arial;background:#eef3f8;color:#182235}.head{background:linear-gradient(135deg,#0f1b33,#2563eb);color:white;padding:18px}.wrap{max-width:1050px;margin:auto;padding:16px}.box,.card{background:white;border-radius:16px;padding:18px;box-shadow:0 8px 24px #0f172a18;margin-bottom:14px}input,select,textarea{width:100%;padding:11px;border:1px solid #cbd5e1;border-radius:9px;margin:5px 0 10px}button,.btn{display:inline-block;border:0;border-radius:9px;padding:10px 14px;background:#2563eb;color:white;font-weight:700;text-decoration:none;cursor:pointer}.green{background:#16a34a}.red{background:#dc2626}.muted{color:#64748b;font-size:13px}.err{color:#b91c1c}.ok{color:#166534}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.stat b{font-size:25px;color:#2563eb}.task{border-left:5px solid #2563eb}.bar{height:10px;background:#e2e8f0;border-radius:20px;overflow:hidden}.bar i{display:block;height:100%;background:#16a34a}table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left}@media(max-width:700px){.grid{grid-template-columns:1fr}.wrap{padding:9px}}
-</style>
-"""
-
-DRIVER_REGISTER_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shofyor ro‘yxatdan o‘tishi</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>🚚 Shofyor ro‘yxatdan o‘tishi</b></div><div class="wrap"><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><h2>Yangi akkaunt</h2><label>Ism</label><input name="ism" required><label>Familiya</label><input name="familiya"><label>Telefon</label><input name="telefon" placeholder="+998901234567" required><label>Login</label><input name="login" required><label>Parol</label><input name="password" type="password" minlength="8" required><button>Ro‘yxatdan o‘tish</button><p class="ok">{{msg}}</p><p class="err">{{error}}</p><p><a href="/shofyor/login">Akkauntim bor — kirish</a></p></form></div></body></html>"""
-
-DRIVER_LOGIN_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shofyor kirishi</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Arial;background:radial-gradient(circle at top right,#fef3c7,transparent 31%),radial-gradient(circle at bottom left,#dbeafe,transparent 31%),#f6f8fc;display:grid;place-items:center;padding:16px}.login{width:min(450px,100%);background:#fff;border:1px solid #e2e8f0;border-radius:26px;padding:30px;box-shadow:0 26px 75px #0f172a22}.badge{width:70px;height:70px;border-radius:22px;display:grid;place-items:center;font-size:34px;background:linear-gradient(145deg,#fef3c7,#eff6ff);box-shadow:inset 0 0 0 1px #fde68a}.brand{font-weight:900;color:#b45309;margin-top:17px;letter-spacing:.6px}.login h1{margin:7px 0 7px;color:#0f172a}.muted{color:#64748b;line-height:1.5;font-size:14px;margin-bottom:22px}label{display:block;font-size:13px;font-weight:900;color:#334155;margin:13px 0 7px}.pw{position:relative}input{width:100%;height:52px;border:1px solid #cbd5e1;border-radius:13px;padding:0 14px;font-size:15px;background:#fbfdff}input:focus{outline:none;border-color:#d97706;box-shadow:0 0 0 4px #d9770618}.eye{position:absolute;right:7px;top:7px;width:38px;height:38px;border:0;border-radius:10px;background:#f1f5f9}.go{width:100%;height:52px;border:0;border-radius:13px;margin-top:20px;background:linear-gradient(135deg,#d97706,#ea580c);color:#fff;font-weight:900;font-size:15px;box-shadow:0 10px 24px #d9770633}.err{color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;padding:10px;border-radius:11px;margin-top:13px}.links{display:flex;justify-content:space-between;gap:10px;margin-top:18px;font-size:13px}.links a{color:#b45309;text-decoration:none;font-weight:800}</style></head><body><form class="login" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><div class="badge">🚚</div><div class="brand">PHARM MEBEL · MEBEL360°</div><h1>Shofyor kabineti</h1><p class="muted">Biriktirilgan yuklar, manzil va yetkazish holatini bitta sahifadan boshqaring.</p><label>Login</label><input name="login" placeholder="Loginni kiriting" required autocomplete="username"><label>Parol</label><div class="pw"><input id="driverPw" name="password" type="password" placeholder="Parolni kiriting" required autocomplete="current-password"><button class="eye" type="button" onclick="driverPw.type=driverPw.type==='password'?'text':'password'">👁</button></div><button class="go">Shofyor kabinetiga kirish →</button><p class="err">{{error}}</p><div class="links"><a href="/shofyor/royxat">Yangi ro‘yxatdan o‘tish</a><a href="/login">Rahbar kirishi</a></div></form></body></html>"""
-
-DRIVER_DASHBOARD_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shofyor kabineti</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><div class="wrap" style="padding:0"><b>🚚 {{driver['ism']}} {{driver['familiya']}}</b><a class="btn red" style="float:right" href="/shofyor/logout">Chiqish</a></div></div><div class="wrap"><h2>Menga biriktirilgan yuklar</h2>{% for x in deliveries %}<a href="/shofyor/yetkazish/{{x['id']}}" style="text-decoration:none;color:inherit"><div class="card task"><div style="display:flex;justify-content:space-between;gap:10px"><div><b style="font-size:21px">{{x['kod']}}</b><p>{{x['mahsulot']}}</p><p class="muted">{{x['manzil']}} · {{x['qavat'] or '-'}}-qavat · Lift: {{x['lift'] or '-'}}</p></div><div><span class="btn {% if x['holat']=='Yetkazib berildi' %}green{% endif %}">{{x['holat']}}</span></div></div></div></a>{% else %}<div class="card">Hozircha yuk biriktirilmagan.</div>{% endfor %}</div></body></html>"""
-
-DRIVER_DETAIL_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{x['kod']}}</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><div class="wrap" style="padding:0"><b>📦 {{x['kod']}}</b><a class="btn" style="float:right" href="/shofyor/kabinet">Orqaga</a></div></div><div class="wrap"><div class="card"><h2>{{x['mahsulot']}}</h2><p><b>Mijoz:</b> {{x['mijoz']}}</p><p><b>Telefon:</b> <a href="tel:{{x['telefon']}}">{{x['telefon']}}</a></p><p><b>Manzil:</b> {{x['manzil']}}</p><p><b>Mo‘ljal:</b> {{x['moljal'] or '-'}}</p><p><b>Qavat:</b> {{x['qavat'] or '-'}}</p><p><b>Lift:</b> {{x['lift'] or '-'}}</p><p><b>Katta mashina:</b> {{x['katta_mashina'] or '-'}}</p><p><b>Qadoqlar:</b> {{x['qadoq_soni']}} ta</p><p><b>Yetkazish navbati:</b> {{x['navbat']}}</p><p><b>Izoh:</b> {{x['izoh'] or x['buyurtma_izoh'] or '-'}}</p>{% if x['lokatsiya'] %}
-<div class="card" style="background:#f8fafc">
-<h3>📍 Xarita tanlang</h3>
-<p class="muted">Lokatsiyani o‘zingiz xohlagan xaritada oching.</p>
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-<a class="btn green" href="https://www.google.com/maps/search/?api=1&query={{x['lokatsiya']|urlencode}}" target="_blank">Google Maps</a>
-<a class="btn" style="background:#ef4444" href="https://yandex.com/maps/?text={{x['lokatsiya']|urlencode}}" target="_blank">Yandex Maps</a>
-</div></div>
-{% endif %}</div><div class="card"><h3>Holat: {{x['holat']}}</h3><form method="post" action="/shofyor/yetkazish/{{x['id']}}/holat"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><button name="action" value="yolga">🚚 Yo‘lga chiqdim</button><button name="action" value="yetib" class="green">📍 Yetib keldim</button><button name="action" value="yetkazildi" style="background:#7c3aed">✅ Yetkazib berdim</button></form><p class="muted">Yo‘lga chiqdi: {{x['yolga_chiqdi'] or '-'}}</p><p class="muted">Yetib keldi: {{x['yetib_keldi'] or '-'}}</p><p class="muted">Yetkazildi: {{x['yetkazildi'] or '-'}}</p></div></div></body></html>"""
-
-DRIVER_ADMIN_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shofyor boshqaruvi</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>🚚 Shofyor boshqaruvi</b><a class="btn" style="float:right" href="/dashboard">ERP bosh sahifa</a></div><div class="wrap"><p class="ok">{{msg}}</p><div class="grid"><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><h3>Shofyor login yaratish</h3><input type="hidden" name="action" value="account"><label>Shofyor</label><select name="ishchi_id" required>{% for d in drivers %}<option value="{{d['id']}}">{{d['ism']}} {{d['familiya']}}</option>{% endfor %}</select><label>Login</label><input name="login" required><label>Parol</label><input name="password" type="password" minlength="8" required><button>Akkaunt yaratish</button></form><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><h3>Yuk biriktirish</h3><input type="hidden" name="action" value="delivery"><label>Buyurtma</label><select name="buyurtma_id" required>{% for o in orders %}<option value="{{o['id']}}">{{o['kod']}} — {{o['mahsulot']}}</option>{% endfor %}</select><label>Shofyor</label><select name="shofyor_id" required>{% for d in drivers %}<option value="{{d['id']}}">{{d['ism']}} {{d['familiya']}}</option>{% endfor %}</select><label>Qadoq soni</label><input type="number" name="qadoq_soni" value="1" min="1"><label>Yetkazish navbati</label><input type="number" name="navbat" value="1" min="1"><label>Izoh</label><textarea name="izoh"></textarea><button>Biriktirish</button></form></div><div class="box" style="overflow:auto"><h3>Shofyor akkauntlari</h3><table><tr><th>Shofyor</th><th>Telefon</th><th>Login</th><th>Holat</th><th>Amal</th></tr>{% for a in driver_accounts %}<tr><td>{{a['ism']}} {{a['familiya']}}</td><td>{{a['telefon'] or '-'}}</td><td>{{a['login']}}</td><td>{% if a['admin_tasdiq'] %}✅ Tasdiqlangan{% else %}⏳ Kutilmoqda{% endif %}</td><td>{% if not a['admin_tasdiq'] %}<form method="post" style="display:inline"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="approve_driver"><input type="hidden" name="account_id" value="{{a['id']}}"><button class="green">Tasdiqlash</button></form>{% endif %}<form method="post" style="display:inline"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="block_driver"><input type="hidden" name="account_id" value="{{a['id']}}"><button class="red">Bloklash</button></form></td></tr>{% endfor %}</table></div><div class="box" style="overflow:auto"><h3>Biriktirilgan yuklar</h3><table><tr><th>Buyurtma</th><th>Mahsulot</th><th>Shofyor</th><th>Qadoq</th><th>Holat</th></tr>{% for a in assigned %}<tr><td>{{a['kod']}}</td><td>{{a['mahsulot']}}</td><td>{{a['ism']}} {{a['familiya']}}</td><td>{{a['qadoq_soni']}}</td><td>{{a['holat']}}</td></tr>{% endfor %}</table></div></div></body></html>"""
-
-
-WORKER_REGISTER_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ishchi ro‘yxati</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>👷 Ishchi ro‘yxatdan o‘tishi</b></div><div class="wrap"><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><h2>Telefon raqamingiz</h2><p class="muted">Masalan: +998 90 123 45 67</p><input name="telefon" required placeholder="+998901234567"><button>Kod olish</button><p class="ok">{{msg}}</p><p class="err">{{error}}</p>{% if demo_code %}<div class="card"><b>Sinov kodi: {{demo_code}}</b><p class="muted">Haqiqiy SMS xizmati ulanmaguncha shu koddan foydalaning.</p><a class="btn green" href="/ishchi/kod">Kodni kiritish</a></div>{% endif %}<p><a href="/ishchi/login">Akkauntim bor — kirish</a></p></form></div></body></html>"""
-
-WORKER_VERIFY_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kodni tasdiqlash</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>🔐 Telefonni tasdiqlash</b></div><div class="wrap"><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><p>{{telefon}}</p><label>Kod</label><input name="kod" inputmode="numeric" maxlength="6" required><label>Ism</label><input name="ism" required><label>Familiya</label><input name="familiya"><label>Yangi login</label><input name="login" required><label>Yangi parol</label><input name="password" type="password" minlength="8" required><button>Ro‘yxatdan o‘tish</button><p class="err">{{error}}</p></form></div></body></html>"""
-
-WORKER_WAIT_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kutilmoqda</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="wrap"><div class="box"><h2>✅ Ro‘yxatdan o‘tdingiz</h2><p>Endi administrator akkauntingizni tasdiqlaydi. Tasdiqlangach login va parolingiz bilan kirasiz.</p><a class="btn" href="/ishchi/login">Kirish sahifasi</a></div></div></body></html>"""
-
-WORKER_LOGIN_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ishchi kirishi</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Arial;background:radial-gradient(circle at top left,#dcfce7,transparent 32%),radial-gradient(circle at bottom right,#dbeafe,transparent 30%),#f6f8fc;display:grid;place-items:center;padding:16px}.login{width:min(450px,100%);background:#fff;border:1px solid #e2e8f0;border-radius:26px;padding:30px;box-shadow:0 26px 75px #0f172a22}.badge{width:70px;height:70px;border-radius:22px;display:grid;place-items:center;font-size:34px;background:linear-gradient(145deg,#dcfce7,#eff6ff);box-shadow:inset 0 0 0 1px #dbeafe}.brand{font-weight:900;color:#166534;margin-top:17px;letter-spacing:.6px}.login h1{margin:7px 0 7px;color:#0f172a}.muted{color:#64748b;line-height:1.5;font-size:14px;margin-bottom:22px}label{display:block;font-size:13px;font-weight:900;color:#334155;margin:13px 0 7px}.pw{position:relative}input{width:100%;height:52px;border:1px solid #cbd5e1;border-radius:13px;padding:0 14px;font-size:15px;background:#fbfdff}input:focus{outline:none;border-color:#16a34a;box-shadow:0 0 0 4px #16a34a18}.eye{position:absolute;right:7px;top:7px;width:38px;height:38px;border:0;border-radius:10px;background:#f1f5f9}.go{width:100%;height:52px;border:0;border-radius:13px;margin-top:20px;background:linear-gradient(135deg,#16a34a,#0f766e);color:#fff;font-weight:900;font-size:15px;box-shadow:0 10px 24px #16a34a33}.err{color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;padding:10px;border-radius:11px;margin-top:13px}.links{display:flex;justify-content:space-between;gap:10px;margin-top:18px;font-size:13px}.links a{color:#15803d;text-decoration:none;font-weight:800}</style></head><body><form class="login" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><div class="badge">👷</div><div class="brand">PHARM MEBEL · MEBEL360°</div><h1>Ishchi kabineti</h1><p class="muted">Sizga biriktirilgan ishlarni boshlang, jarayon foizini kiriting va tugaganini belgilang.</p><label>Login</label><input name="login" placeholder="Loginni kiriting" required autocomplete="username"><label>Parol</label><div class="pw"><input id="workerPw" name="password" type="password" placeholder="Parolni kiriting" required autocomplete="current-password"><button class="eye" type="button" onclick="workerPw.type=workerPw.type==='password'?'text':'password'">👁</button></div><button class="go">Ishchi kabinetiga kirish →</button><p class="err">{{error}}</p><div class="links"><a href="/ishchi/royxat">Yangi ro‘yxatdan o‘tish</a><a href="/login">Rahbar kirishi</a></div></form></body></html>"""
-
-WORKER_DASHBOARD_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ishchi kabineti</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><div class="wrap" style="padding:0"><b>👷 {{worker['ism']}} {{worker['familiya']}}</b> — {{worker['lavozim']}} <a class="btn red" style="float:right" href="/ishchi/logout">Chiqish</a></div></div><div class="wrap">
-{% with messages = get_flashed_messages() %}{% if messages %}<div class="card err">{{messages[0]}}</div>{% endif %}{% endwith %}
-<div class="grid"><div class="card stat"><span>HOZIRGI HOLAT</span><br><b style="color:{% if worker_state=='Ishlayapti' %}#16a34a{% else %}#64748b{% endif %}">{{worker_state}}</b></div><div class="card stat"><span>ISHLAGAN KUN</span><br><b>{{stats['kun'] or 0}}</b></div><div class="card stat"><span>JAMI SOAT</span><br><b>{{'%.1f'|format(stats['soat'] or 0)}}</b></div></div>
-{% if active_task %}<div class="card" style="border-left:7px solid #16a34a"><h3>🟢 Hozir ishlayotgan ishim</h3><p><b>{{active_task['ish_turi']}}</b> — {{active_task['buyurtma_kodi'] or 'Buyurtmasiz'}}</p><p>{{active_task['tavsif']}}</p><p>Boshlangan vaqt: <b>{{active_task['boshlandi_vaqt']}}</b></p></div>{% endif %}
-<h2>Topshiriqlarim</h2>{% for t in tasks %}<div class="card task"><b>{{t['ish_turi']}}</b> {% if t['buyurtma_kodi'] %}<span class="muted">— {{t['buyurtma_kodi']}}</span>{% endif %}<p>{{t['tavsif']}}</p><div class="bar"><i style="width:{{t['progress']}}%"></i></div><p><b>{{t['progress']}}%</b> · {{t['holat']}} · Reja: {{t['sana']}}{% if t['tugash_sana'] %} — {{t['tugash_sana']}}{% endif %}</p><p class="muted">Boshladi: {{t['boshlandi_vaqt'] or '-'}} · Tugatdi: {{t['tugadi_vaqt'] or '-'}}</p>
-{% if t['holat']=='Yangi' or t['holat']=='Jarayonda' %}<form method="post" action="/ishchi/topshiriq/{{t['id']}}/boshlash"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><button class="green">▶ Ishni boshladim</button></form>{% elif t['holat']=='Ishlayapti' %}<form method="post" action="/ishchi/topshiriq/{{t['id']}}/tugatish"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><button style="background:#7c3aed">✅ Ishni tugatdim</button></form>{% endif %}
-{% if t['holat']!='Tayyor' %}<form method="post" action="/ishchi/topshiriq/{{t['id']}}"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="holat" value="{{t['holat']}}"><label>Jarayon foizi</label><input type="number" name="progress" min="0" max="100" value="{{t['progress']}}"><button>Foizni yangilash</button></form>{% endif %}</div>{% else %}<div class="card">Hozircha topshiriq yo‘q. Holatingiz: <b>Bo‘sh</b>.</div>{% endfor %}</div></body></html>"""
-
-WORKER_ADMIN_HTML = r"""<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ishchi boshqaruvi</title>"""+WORKER_BASE_STYLE+r"""</head><body><div class="head"><b>👥 Ishchi kabinetlarini boshqarish</b> <a class="btn" style="float:right" href="/dashboard">ERP bosh sahifa</a></div><div class="wrap">
-<div class="box" style="overflow:auto"><h3>Ishchilarning hozirgi holati</h3><table><tr><th>Ishchi</th><th>Holat</th><th>Buyurtma</th><th>Ish turi</th><th>Boshlagan vaqt</th></tr>{% for w in worker_states %}<tr><td>{{w['ism']}} {{w['familiya']}}</td><td>{% if w['ish_holati']=='Ishlayapti' %}<b style="color:#16a34a">🟢 Ishlayapti</b>{% else %}<b style="color:#64748b">⚪ Bo‘sh</b>{% endif %}</td><td>{{w['buyurtma_kodi'] or '-'}}</td><td>{{w['ish_turi'] or '-'}}</td><td>{{w['boshlandi_vaqt'] or '-'}}</td></tr>{% endfor %}</table></div>
-<div class="grid"><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><h3>Yangi topshiriq</h3><input type="hidden" name="action" value="task"><label>Ishchi</label><select name="ishchi_id" required>{% for w in workers %}<option value="{{w['id']}}">{{w['ism']}} {{w['familiya']}} — {{w['lavozim']}}</option>{% endfor %}</select><label>Buyurtma kodi</label><input name="buyurtma_kodi" placeholder="AB 007"><label>Ish turi</label><input name="ish_turi" required placeholder="Kesish / Rover / Yig‘ish"><label>Topshiriq</label><textarea name="tavsif" placeholder="Nima ish qilishi kerakligini batafsil yozing"></textarea><label>Boshlanish rejasi</label><input type="date" name="sana" value="{{today}}"><label>Tugash rejasi</label><input type="date" name="tugash_sana"><button>Topshiriq berish</button></form><div class="box" style="grid-column:span 2;overflow:auto"><h3>Ro‘yxatdan o‘tganlar</h3><table><tr><th>Ishchi</th><th>Telefon</th><th>Login</th><th>Holat</th><th>Amal</th></tr>{% for a in accounts %}<tr><td>{{a['ism']}} {{a['familiya']}}</td><td>{{a['telefon']}}</td><td>{{a['login'] or ''}}</td><td>{% if a['admin_tasdiq'] %}✅ Tasdiqlangan{% else %}⏳ Kutilmoqda{% endif %}</td><td>{% if not a['admin_tasdiq'] %}<form method="post" style="display:inline"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="approve"><input type="hidden" name="account_id" value="{{a['id']}}"><button class="green">Tasdiqlash</button></form>{% endif %}<form method="post" style="display:inline"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="block"><input type="hidden" name="account_id" value="{{a['id']}}"><button class="red">Bloklash</button></form></td></tr>{% endfor %}</table></div></div>
-<div class="box" style="overflow:auto"><h3>Topshiriqlar tarixi</h3><table><tr><th>Ishchi</th><th>Buyurtma</th><th>Ish</th><th>Holat</th><th>Progress</th><th>Boshladi</th><th>Tugatdi</th></tr>{% for t in tasks %}<tr><td>{{t['ism']}} {{t['familiya']}}</td><td>{{t['buyurtma_kodi']}}</td><td>{{t['ish_turi']}}</td><td>{{t['holat']}}</td><td>{{t['progress']}}%</td><td>{{t['boshlandi_vaqt'] or '-'}}</td><td>{{t['tugadi_vaqt'] or '-'}}</td></tr>{% endfor %}</table></div></div></body></html>"""
-
-
-HTML = r"""
-<!doctype html>
-<html lang="uz">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PHARM MEBEL</title>
-<style>
-:root{--nav:#0f1b33;--blue:#2563eb;--bg:#eef3f8;--card:#fff;--text:#182235;--muted:#64748b;--danger:#dc2626;--ok:#16a34a}
-*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:var(--bg);color:var(--text)}
-header{background:linear-gradient(135deg,#0f1b33,#1d4ed8);color:#fff;padding:20px;position:sticky;top:0;z-index:5}
-.top{max-width:1400px;margin:auto;display:grid;grid-template-columns:auto auto 1fr;align-items:center;gap:16px}
-.brand{display:flex;align-items:center;gap:12px;min-width:310px}.brand-logo{width:105px;height:66px;object-fit:contain;background:#fff;border-radius:12px;padding:4px;box-shadow:0 5px 16px #0003}.brand-text h1{margin:0;font-size:27px}.sub{opacity:.88;font-size:13px;margin-top:3px}.live-clock{min-width:155px;text-align:center;background:#ffffff18;border:1px solid #ffffff35;border-radius:14px;padding:8px 13px;box-shadow:0 6px 18px #0002}.live-clock-time{font-size:25px;font-weight:900;letter-spacing:2px;line-height:1.1}.live-clock-date{font-size:11px;opacity:.92;margin-top:4px;white-space:nowrap}.header-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px}.header-actions a{display:inline-flex;text-decoration:none}.header-actions button{white-space:nowrap}h1{margin:0;font-size:27px}.wrap{max-width:1400px;margin:auto;padding:16px}
-.cards{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:15px}
-.card,.panel{background:var(--card);border-radius:14px;box-shadow:0 7px 20px #0f172a12;padding:14px}
-.card span{font-size:11px;color:var(--muted);font-weight:700}.card b{display:block;font-size:25px;color:var(--blue);margin-top:5px}
-.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:13px}
-button{border:0;border-radius:9px;padding:9px 13px;background:var(--blue);color:#fff;font-weight:700;cursor:pointer}
-button:hover{filter:brightness(.94)}.tabs button{background:#dbe5f4;color:#24334d}.tabs button.active{background:var(--nav);color:#fff}
-.tab{display:none}.tab.active{display:block}.grid{display:grid;grid-template-columns:360px 1fr;gap:14px}
-h3{margin:0 0 11px}label{display:block;font-size:12px;font-weight:700;margin-top:8px;color:#334155}
-input,select,textarea{width:100%;margin-top:4px;padding:9px;border:1px solid #cbd5e1;border-radius:8px;background:#fff}
-textarea{min-height:65px}form button{width:100%;margin-top:12px}table{width:100%;border-collapse:collapse;font-size:12px}
-th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:nowrap}th{background:#f8fafc;color:#475569}
-.tablewrap{overflow:auto;max-height:590px}.danger{background:var(--danger);padding:6px 9px}.ok{background:var(--ok)}
-.msg{min-height:18px;margin-top:7px;font-size:12px;color:#166534}.badge{padding:3px 7px;border-radius:20px;background:#e0e7ff;color:#3730a3;font-size:11px}
-.money{font-weight:700;color:#166534}.minus{font-weight:700;color:#b91c1c}.balance{font-weight:800;color:#1d4ed8}
-.stage{display:flex;align-items:center;gap:6px;padding:6px 0}.stage input{width:auto;margin:0}.low{background:#fee2e2!important}
-@media(max-width:1150px){.top{grid-template-columns:1fr auto}.header-actions{grid-column:1/-1;justify-content:flex-start}.cards{grid-template-columns:repeat(3,1fr)}.grid{grid-template-columns:1fr}}
-@media(max-width:600px){.top{display:flex;flex-direction:column;align-items:stretch}.brand{min-width:0}.brand-logo{width:88px;height:58px}.brand-text h1{font-size:22px}.live-clock{width:100%}.header-actions{justify-content:flex-start}.cards{grid-template-columns:repeat(2,1fr)}header{position:static;padding:13px}.wrap{padding:9px}}
-</style>
-</head>
-<body>
-<header><div class="top">
-<div class="brand">
-  <img class="brand-logo" src="data:image/jpeg;base64,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ZdVmJ36wSATABEgAABJSVIAAAExMDmnSua05+f1U18vnzj8h4K3xe2antldO5VRVfvqmKosiRFRKEiEoRJIkUplMJhACJQppqiFFFdKLdFy2rZ8/o89WE0reNM5+W1h87g8ObCbNrWy9+nU9q1bae7umJjTREwSBEwBEYb5o+mfmenNRGQ2TPLE/RXy11i+vV4NemjhO/wDDsudO0YymOF+hPnr6EvptkTGvTwPSt20nDj6d2PjnY79CYX1mEiJI+bcBn9fx4ux9N5l03XrmHgm3H9GzGLx4+t9K17YNOpxnsvGkc137Qt6z5u7jbtQRBKbPnf6I+daY6x1zkfW65dYmJ26QWAAAAAAAmmYJAAATBMSKebdK5rTDn1dNXL51Xg93grfFbbqW2V07nXTXfvmqJixHjiPTHz74cuX6QcGu2nujhVw7lXw/ZV+nKatdgWRJEAiYIU1UQportlNuqiK2vPf81Yxmn7hqPPzW8HnsBhz4PZNb2P0L9T2zUdu7e6RppCRAETAERifmX6a+Zac/u+hvnn6cR8yUda45Wn0dkuG5+ddJx1jqsZbtw36P+braYH6G+ePoWK7fExr1cF0nddJw4crnNcys2yE+CpPQOl8u6hrvMTC/zhr2xa7jx57N6/lbW9WAy2MrW113im0J79OMyevXHGuzcajPmnu8Prx5NieVfX053V87a3cpprv0x86/RXztTHV+uci65XLrExO3WCUwCYAAAAAAAAAJiYJIHNelc0pz6BVRVy+fcx2Rx1b4ratU2uunda6a9PQmqmqsx4fb4M6cV1Db9O5PHiY6H19HP3d5ttwncMpiJp3uaard0krwkimSSFuIWbemxXc6eD11x7nRpWy1t6rFdlbwajtGq4YU4LNYHHnw2xa5sXfbqm3aht/b3SNNETAABAiMT8yfTnzHTm93078xfTyY4L37BW0+brty3jyZn6G1zbdOq383fSXzdFdf+hfnn6HU24adXBNJ3bSMeLpnZeOdj06UwtomJkiaYfOWvZ/X8eHsnS+ZdOv1rVyLX45zbvfBM+Pdu7/NP0nptc432PjZzXedF3rLDusw17ZEwmJS+dvor52pjqnXeSdbrj1hDbslELVolEkEwAAAAESAAAExMExIp5p0vm1Ofn1VFfL51eOyOOrfF7Xq21027nVTVr31liEaRrGic/L78f7a6cHm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" alt="Pharm Mebel logosi">
-  <div class="brand-text">
-    <h1>PHARM MEBEL</h1>
-    <div class="sub">Ishchilar, buyurtmalar, ombor, ishlab chiqarish va moliya</div>
-  </div>
-</div>
-<div class="live-clock">
-  <div id="pharmClock" class="live-clock-time">00:00:00</div>
-  <div id="pharmDate" class="live-clock-date">Toshkent vaqti</div>
-</div>
-<div class="header-actions">
-  <a href="/pro-boshqaruv"><button style="background:#0f766e">PRO boshqaruv</button></a>
-  <a href="/xodim-akkauntlari"><button style="background:#2563eb">Menejer / Konstruktor</button></a>
-  <a href="/shofyor-boshqaruv"><button style="background:#7c3aed">Shofyor boshqaruvi</button></a>
-  <a href="/shartnoma-namuna"><button style="background:#0f766e">Shartnoma Word</button></a>
-  <a href="/shartnoma-pdf" target="_blank"><button style="background:#0369a1">Shartnoma PDF</button></a>
-  <a href="/backup"><button style="background:#16a34a">Backup</button></a>
-  <a href="/logout"><button style="background:#dc2626">Chiqish</button></a>
-</div>
-</div></header>
-<main class="wrap">
-<div class="cards">
- <div class="card"><span>ISHCHILAR</span><b id="dWorkers">0</b></div>
- <div class="card"><span>FAOL BUYURTMALAR</span><b id="dOrders">0</b></div>
- <div class="card"><span>BUGUNGI SOAT</span><b id="dHours">0</b></div>
- <div class="card"><span>BUGUNGI ISH</span><b id="dProduction">0</b></div>
- <div class="card"><span>BUGUNGI KM</span><b id="dKm">0</b></div>
- <div class="card"><span>KAM QOLDIQ</span><b id="dLow">0</b></div>
-</div>
-
-<div class="tabs">
- <button class="active" data-tab="workers">Ishchilar</button>
- <button data-tab="attendance">Keldi-ketdi</button>
- <button data-tab="results">Ish natijasi</button>
- <button data-tab="orders">Buyurtmalar</button>
- <button data-tab="stock">Ombor</button>
- <button data-tab="trips">Shofyor</button>
- <button data-tab="payments">To‘lov</button>
- <button data-tab="penalties">Jarima</button>
- <button data-tab="totals">Jami/Reyting</button>
- <button data-tab="expenses">Xarajat</button>
- <button data-tab="bonuses">Bonus/Ta’til</button>
- <button data-tab="finished">Tayyor mahsulot</button>
- <button data-tab="finance">Foyda</button>
- <button data-tab="customerPro">Mijoz PRO</button>
- <button data-tab="service">Servis/Kafolat</button>
- <button data-tab="delivery">Yetkazish</button>
-</div>
-
-<section id="workers" class="tab active"><div class="grid">
-<div class="panel"><h3>Yangi ishchi</h3><form id="workerForm">
-<label>Ism<input name="ism" required></label><label>Familiya<input name="familiya"></label>
-<label>Telefon<input name="telefon"></label><label>Lavozim<input name="lavozim"></label>
-<label>Ishga kirgan sana<input type="date" name="ishga_kirgan_sana"></label>
-<label>Staj (yil)<input type="number" step="0.1" name="staj_yil" value="0"></label>
-<label>Kunlik stavka<input type="number" name="kunlik_stavka" value="0"></label>
-<label>Oylik maosh<input type="number" name="oylik_maosh" value="0"></label>
-<label>Sifat balli (1-10)<input type="number" min="1" max="10" name="sifat_ball" value="5"></label>
-<label>Tezlik balli (1-10)<input type="number" min="1" max="10" name="tezlik_ball" value="5"></label>
-<label>Intizom balli (1-10)<input type="number" min="1" max="10" name="intizom_ball" value="5"></label>
-<hr><h3>Maxfiy hujjatlar</h3>
-<p style="font-size:12px;color:#64748b">Bu ma’lumotlarni faqat rahbar ko‘radi.</p>
-<label>Pasport/ID seriya-raqami<input name="pasport"></label>
-<label>JSHSHIR<input name="jshshir"></label>
-<label>Tug‘ilgan sana<input type="date" name="tugilgan_sana"></label>
-<label>Yashash manzili<textarea name="yashash_manzil"></textarea></label>
-<label>Pasport berilgan sana<input type="date" name="pasport_berilgan_sana"></label>
-<label>Pasportni bergan tashkilot<input name="pasport_bergan"></label>
-<label>Favqulodda aloqa telefoni<input name="favqulodda_telefon"></label>
-<label>Izoh<textarea name="izoh"></textarea></label><button>Saqlash</button><div class="msg"></div>
-</form></div><div class="panel tablewrap"><h3>Ishchilar</h3><table><thead><tr><th>Ism</th><th>Lavozim</th><th>Staj</th><th>Kunlik</th><th>Oylik</th><th></th></tr></thead><tbody id="workersBody"></tbody></table></div>
-</div></section>
-
-<section id="attendance" class="tab"><div class="grid"><div class="panel"><h3>Avtomatik keldi-ketdi</h3>
-<label>Ishchi<select class="workerSelect" id="autoWorkerSelect" required></select></label>
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-<button type="button" class="ok" onclick="clockIn()">Hozir keldi</button>
-<button type="button" style="background:#dc2626" onclick="clockOut()">Hozir ketdi</button>
-</div><div id="attendanceAutoMsg" class="msg"></div>
-<hr><h3>Qo‘lda kiritish</h3><form id="attendanceForm">
-<label>Ishchi<select class="workerSelect" name="ishchi_id" required></select></label><label>Sana<input type="date" name="sana" required></label>
-<label>Keldi<input type="time" name="keldi_vaqti" required></label><label>Ketdi<input type="time" name="ketdi_vaqti" required></label>
-<button>Saqlash</button><div class="msg"></div></form></div><div class="panel tablewrap"><table><thead><tr><th>Ishchi</th><th>Sana</th><th>Keldi</th><th>Ketdi</th><th>Soat</th></tr></thead><tbody id="attendanceBody"></tbody></table></div></div></section>
-
-<section id="results" class="tab"><div class="grid"><div class="panel"><h3>Ish natijasi</h3><form id="resultForm">
-<label>Ishchi<select class="workerSelect" name="ishchi_id" required></select></label>
-<label>Ish turi<select id="workTypeSelect" name="ish_turi_id" required></select></label>
-<label>Sana<input type="date" name="sana" required></label><label>Miqdor<input type="number" step="0.1" name="miqdor" required></label>
-<label>Birlik narxi<input type="number" name="birlik_narxi" value="0"></label>
-<label>Buyurtma kodi<input name="buyurtma_kodi"></label><label>Izoh<textarea name="izoh"></textarea></label>
-<button>Saqlash</button><div class="msg"></div></form></div><div class="panel tablewrap"><table><thead><tr><th>Ishchi</th><th>Ish turi</th><th>Sana</th><th>Miqdor</th><th>Haq</th><th>Buyurtma</th></tr></thead><tbody id="resultsBody"></tbody></table></div></div></section>
-
-<section id="orders" class="tab"><div class="grid"><div class="panel"><h3>Yangi buyurtma</h3><form id="orderForm">
-<label>Kod<input name="kod" required placeholder="AB-001"></label><label>Mijoz<input name="mijoz" required></label><label>Telefon<input name="telefon"></label>
-<label>Manzil<input name="manzil"></label>
-<label>Pasport/ID<input name="pasport_id"></label>
-<label>Mahsulot<input name="mahsulot"></label>
-<label>O‘lcham<input name="olcham" placeholder="2000x600x2400 mm"></label>
-<label>Soni<input type="number" name="soni" value="1" min="1"></label>
-<label>Material<input name="material" placeholder="MDF / LDSP / Akril"></label>
-<label>Rang<input name="rang" placeholder="Rang yoki kod"></label>
-<label>Umumiy narx<input type="number" name="umumiy_narx" value="0"></label>
-<label>Avans<input type="number" name="oldindan_tolov" value="0"></label>
-<label>Oraliq to‘lov<input type="number" name="oraliq_tolov" value="0"></label>
-<label>To‘lov usuli<select name="tolov_usuli"><option>Naqd</option><option>Click</option><option>Payme</option><option>Bank orqali</option><option>Plastik karta</option><option>Qarz</option></select></label>
-<label>Yetkazish<select name="yetkazish"><option>Kiritilgan</option><option>Kiritilmagan</option><option>Alohida haq</option></select></label>
-<label>Montaj<select name="montaj"><option>Kiritilgan</option><option>Kiritilmagan</option><option>Alohida haq</option></select></label>
-<label>Kafolat muddati<input name="kafolat_muddati" value="12 oy"></label>
-<label>Boshlanish sana<input type="date" name="boshlanish_sana"></label>
-<label>Tugash sana<input type="date" name="tugash_sana"></label>
-<label>Taxminiy tayyor sana<input type="date" name="taxminiy_sana"></label>
-<label>Mas’ul xodim<input name="masul_xodim"></label>
-<label>Holat<select name="holat"><option>Yangi</option><option>Jarayonda</option><option>Tayyor</option><option>Yetkazildi</option></select></label>
-<label>Kechikish sababi<select name="kechikish_turi"><option value="">Yo‘q</option><option>Korxona</option><option>Mijoz</option><option>Material</option><option>Favqulodda holat</option></select></label>
-<label>Kechikish chegirmasi (%/kun)<input type="number" step="0.1" name="kechikish_foiz" value="0"></label>
-<label>Maksimal chegirma %<input type="number" step="0.1" name="maks_chegirma_foiz" value="20"></label>
-<label>Keshbek %<input type="number" step="0.1" name="keshbek_foiz" value="0"></label>
-<label>Keshbek summasi<input type="number" name="keshbek_summa" value="0"></label>
-<label>Kafolat boshlanish<input type="date" name="kafolat_boshlanish"></label>
-<label>Kafolat tugash<input type="date" name="kafolat_tugash"></label>
-<label>Kafolat sharti<textarea name="kafolat_sharti"></textarea></label>
-<label>Lokatsiya havolasi<input name="lokatsiya" placeholder="Google Maps havolasi"></label>
-<label>Mo‘ljal<input name="moljal"></label>
-<label>Qavat<input name="qavat"></label>
-<label>Lift<select name="lift"><option></option><option>Bor</option><option>Yo‘q</option></select></label>
-<label>Katta mashina<select name="katta_mashina"><option></option><option>Kira oladi</option><option>Kira olmaydi</option></select></label>
-<label>Izoh<textarea name="izoh"></textarea></label><button>Saqlash</button><div class="msg"></div></form></div>
-<div class="panel tablewrap"><h3>Buyurtmalar</h3><table><thead><tr><th>Kod</th><th>Mijoz</th><th>Mahsulot</th><th>Narx</th><th>To‘lov</th><th>Qoldiq</th><th>Holat</th><th>Jarayon</th><th>Bosqich</th><th>To‘lov</th></tr></thead><tbody id="ordersBody"></tbody></table></div></div></section>
-
-<section id="stock" class="tab"><div class="grid"><div class="panel"><h3>Ombor harakati</h3><form id="stockForm">
-<label>Material<select id="stockSelect" name="material_id" required></select></label><label>Sana<input type="date" name="sana" required></label>
-<label>Turi<select name="turi"><option>Kirim</option><option>Chiqim</option></select></label><label>Miqdor<input type="number" step="0.1" name="miqdor" required></label>
-<label>Buyurtma kodi<input name="buyurtma_kodi"></label><label>Izoh<input name="izoh"></label><button>Saqlash</button><div class="msg"></div></form></div>
-<div class="panel tablewrap"><h3>Ombor qoldig‘i</h3><table><thead><tr><th>Material</th><th>Kategoriya</th><th>Qoldiq</th><th>Birlik</th><th>Min.</th></tr></thead><tbody id="stockBody"></tbody></table></div></div></section>
-
-<section id="trips" class="tab"><div class="grid"><div class="panel"><h3>Shofyor safari</h3><form id="tripForm">
-<label>Shofyor<select class="workerSelect" name="ishchi_id" required></select></label><label>Sana<input type="date" name="sana" required></label>
-<label>Mashina<input name="mashina"></label><label>Qayerdan<input name="qayerdan"></label><label>Qayerga<input name="qayerga"></label>
-<label>Masofa km<input type="number" step="0.1" name="masofa_km"></label><label>Sabab<input name="sabab"></label>
-<label>Yoqilg‘i litr<input type="number" step="0.1" name="yonilgi"></label><label>Xarajat<input type="number" name="xarajat"></label>
-<button>Saqlash</button><div class="msg"></div></form></div><div class="panel tablewrap"><table><thead><tr><th>Shofyor</th><th>Sana</th><th>Mashina</th><th>Yo‘nalish</th><th>Km</th><th>Sabab</th><th>Xarajat</th></tr></thead><tbody id="tripsBody"></tbody></table></div></div></section>
-
-<section id="payments" class="tab"><div class="grid"><div class="panel"><h3>To‘lov</h3><form id="paymentForm">
-<label>Ishchi<select class="workerSelect" name="ishchi_id" required></select></label><label>Sana<input type="date" name="sana" required></label>
-<label>Summa<input type="number" name="miqdor" required></label><label>Turi<select name="turi"><option>Avans</option><option>Oylik</option><option>Bonus</option></select></label>
-<label>Izoh<input name="tavsifi"></label><button>Saqlash</button><div class="msg"></div></form></div><div class="panel tablewrap"><table><thead><tr><th>Ishchi</th><th>Sana</th><th>Summa</th><th>Turi</th></tr></thead><tbody id="paymentsBody"></tbody></table></div></div></section>
-
-<section id="penalties" class="tab"><div class="grid"><div class="panel"><h3>Jarima</h3><form id="penaltyForm">
-<label>Ishchi<select class="workerSelect" name="ishchi_id" required></select></label><label>Sana<input type="date" name="sana" required></label>
-<label>Summa<input type="number" name="miqdor" required></label><label>Sababi<input name="sababi"></label><button>Saqlash</button><div class="msg"></div></form></div>
-<div class="panel tablewrap"><table><thead><tr><th>Ishchi</th><th>Sana</th><th>Summa</th><th>Sabab</th></tr></thead><tbody id="penaltiesBody"></tbody></table></div></div></section>
-
-<section id="totals" class="tab"><div class="panel">
-<div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-bottom:12px">
-<label style="margin:0">Boshlanish<input id="totalStart" type="date"></label><label style="margin:0">Tugash<input id="totalEnd" type="date"></label>
-<button onclick="loadTotals()">Hisoblash</button><button onclick="setMonth()" style="background:#475569">Shu oy</button>
-<a id="csvLink"><button style="background:#16a34a">Excel/CSV</button></a></div>
-<div class="tablewrap"><table><thead><tr><th>O‘rin</th><th>Ishchi</th><th>Lavozim</th><th>Kun</th><th>Soat</th><th>Miqdor</th><th>Ish haqi</th><th>Jarima</th><th>Bonus</th><th>To‘langan</th><th>Qoldiq</th><th>Reyting</th></tr></thead><tbody id="totalsBody"></tbody></table></div>
-</div></section>
-
-<section id="expenses" class="tab">
-<div class="grid">
-<div class="panel"><h3>Yangi xarajat</h3><form id="expenseForm">
-<label>Sana<input type="date" name="sana" required></label>
-<label>Kategoriya<select name="kategoriya">
-<option>Material</option><option>Furnitura</option><option>Ishlab chiqarish</option>
-<option>Ishchi</option><option>Transport</option><option>Seh</option>
-<option>Ofis va reklama</option><option>Mijoz va buyurtma</option>
-<option>Uy</option><option>Akam</option><option>Ota uchun</option><option>Ona uchun</option>
-<option>Favqulodda</option><option>Boshqa</option>
-</select></label>
-<label>Xarajat nomi<select name="xarajat_nomi">
-<option>MDF</option><option>DSP</option><option>LDSP</option><option>HDF</option><option>DVP</option>
-<option>Akril</option><option>Fanera</option><option>Oyna</option><option>Shisha</option>
-<option>Kromka</option><option>Profil</option><option>Bo‘yoq</option><option>Lak</option>
-<option>Grunt</option><option>Shpaklyovka</option><option>Yelim</option><option>Silikon</option>
-<option>Porolon</option><option>Mato</option><option>Ekokoja</option><option>Qadoqlash materiali</option>
-<option>Petlya</option><option>Ruchka</option><option>Napravlyayushiy</option><option>Gazlift</option>
-<option>Oyoq</option><option>G‘ildirak</option><option>Zamok</option><option>Magnit</option>
-<option>Samorez</option><option>Bolt va gayka</option><option>Tortma mexanizmi</option>
-<option>Ko‘tarma mexanizm</option><option>LED lenta</option><option>Blok pitaniya</option>
-<option>Sim va elektr jihozlari</option><option>Raspil</option><option>Kromka urish</option>
-<option>CNC Rover</option><option>Frezalash</option><option>Lazer</option><option>Teshish</option>
-<option>Bo‘yash</option><option>Sayqalash</option><option>Oyna teshish</option>
-<option>Oyna kesish</option><option>Payvandlash</option><option>Tashqi ustaga berilgan ish</option>
-<option>Qayta ishlash xarajati</option><option>Yaroqsiz mahsulot</option><option>Material chiqindisi</option>
-<option>Kunlik ish haqi</option><option>Oylik maosh</option><option>Soatbay haq</option>
-<option>Ish hajmiga haq</option><option>Avans</option><option>Bonus</option>
-<option>Qo‘shimcha ish haqi</option><option>Ortib ishlagan vaqt</option>
-<option>Ovqat puli</option><option>Yo‘l puli</option><option>Telefon puli</option>
-<option>Xizmat safari</option><option>Ishchi kiyimi</option><option>Himoya vositalari</option>
-<option>Benzin</option><option>Gaz</option><option>Dizel</option><option>Moy almashtirish</option>
-<option>Mashina ta’miri</option><option>Ehtiyot qismlar</option><option>Shina</option>
-<option>Yuvish</option><option>Jarima</option><option>Yo‘l haqi</option><option>Parking</option>
-<option>Yuk tashish</option><option>Yetkazib berish</option><option>Bozorga borish</option>
-<option>Raspildan olib kelish</option><option>Mijoz uyiga borish</option>
-<option>Elektr</option><option>Gaz</option><option>Suv</option><option>Ijara</option>
-<option>Internet</option><option>Telefon</option><option>Qo‘riqlash</option><option>Tozalash</option>
-<option>Chiqindi olib ketish</option><option>Stanok ta’miri</option><option>Asbob-uskunalar</option>
-<option>Freza</option><option>Disk</option><option>Sverlo</option><option>Zımpara</option>
-<option>Kompressor xarajati</option><option>Moylash vositalari</option><option>Texnika xavfsizligi</option>
-<option>Kantselyariya</option><option>Printer qog‘ozi</option><option>Kartrij</option>
-<option>Kompyuter ta’miri</option><option>Dastur xarajati</option><option>Hosting</option>
-<option>Domen</option><option>SMS xizmati</option><option>Reklama</option>
-<option>Instagram reklama</option><option>Telegram reklama</option><option>OLX reklama</option>
-<option>Foto-video</option><option>Dizayn</option><option>Bank xizmati</option>
-<option>Soliq</option><option>Buxgalteriya</option><option>Razmer olish</option>
-<option>Chizma tayyorlash</option><option>Namuna tayyorlash</option><option>Montaj</option>
-<option>Qavatga ko‘tarish</option><option>Servis</option><option>Kafolat ta’miri</option>
-<option>Mijozga chegirma</option><option>Keshbek</option><option>Qaytarilgan pul</option>
-<option>Kechikish kompensatsiyasi</option><option>Qo‘shimcha ish</option>
-<option>Uy uchun</option><option>Akam</option><option>Ota uchun</option><option>Ona uchun</option>
-<option>Seh uchun</option><option>Qarzdorlik yopish</option><option>Favqulodda xarajat</option>
-<option>Boshqa xarajat</option>
-</select></label>
-<label>Summa<input type="number" name="miqdor" required></label>
-<label>To‘lov usuli<select name="tolov_usuli">
-<option>Naqd</option><option>Click</option><option>Payme</option>
-<option>Bank orqali</option><option>Plastik karta</option><option>Qarz</option>
-</select></label>
-<label>Buyurtma kodi<input name="buyurtma_kodi" placeholder="AB 007"></label>
-<label>Kimga berildi<input name="kimga_berildi"></label>
-<label>Chek rasmi yoki havolasi<input name="chek_havola"></label>
-<label>Izoh<input name="tavsifi"></label>
-<button>Saqlash</button><div class="msg"></div>
-</form></div>
-<div class="panel tablewrap"><table><thead><tr>
-<th>Sana</th><th>Kategoriya</th><th>Xarajat nomi</th><th>Summa</th>
-<th>To‘lov usuli</th><th>Buyurtma</th><th>Kimga</th><th>Izoh</th>
-</tr></thead><tbody id="expensesBody"></tbody></table></div>
-</div></section>
-
-<section id="bonuses" class="tab"><div class="grid"><div class="panel"><h3>Bonus</h3><form id="bonusForm"><label>Ishchi<select class="workerSelect" name="ishchi_id" required></select></label><label>Sana<input type="date" name="sana" required></label><label>Summa<input type="number" name="miqdor" required></label><label>Sabab<input name="sababi"></label><button>Bonus saqlash</button><div class="msg"></div></form><hr><h3>Ta’til / holat</h3><form id="statusForm"><label>Ishchi<select class="workerSelect" name="ishchi_id" required></select></label><label>Sana<input type="date" name="sana" required></label><label>Turi<select name="turi"><option>Dam olish</option><option>Ta’til</option><option>Kasallik</option><option>Sababsiz</option></select></label><label>Izoh<input name="izoh"></label><button>Saqlash</button><div class="msg"></div></form></div>
-<div class="panel tablewrap"><h3>Bonuslar</h3><table><thead><tr><th>Ishchi</th><th>Sana</th><th>Summa</th><th>Sabab</th></tr></thead><tbody id="bonusesBody"></tbody></table><h3 style="margin-top:20px">Ta’til va holatlar</h3><table><thead><tr><th>Ishchi</th><th>Sana</th><th>Turi</th><th>Izoh</th></tr></thead><tbody id="statusesBody"></tbody></table></div></div></section>
-
-<section id="finished" class="tab"><div class="grid"><div class="panel"><h3>Tayyor mahsulot</h3><form id="finishedForm"><label>Nomi<input name="nomi" required></label><label>Kodi<input name="kodi"></label><label>Rang<input name="rang"></label><label>Miqdor<input type="number" step="0.1" name="miqdor" required></label><label>Birlik<select name="birlik"><option>dona</option><option>komplekt</option></select></label><label>Narx<input type="number" name="narx"></label><label>Izoh<input name="izoh"></label><button>Saqlash</button><div class="msg"></div></form></div><div class="panel tablewrap"><table><thead><tr><th>Nomi</th><th>Kod</th><th>Rang</th><th>Miqdor</th><th>Narx</th></tr></thead><tbody id="finishedBody"></tbody></table></div></div></section>
-
-<section id="finance" class="tab"><div class="panel"><h3>Moliyaviy xulosa</h3><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end"><label>Boshlanish<input id="finStart" type="date"></label><label>Tugash<input id="finEnd" type="date"></label><button onclick="loadFinance()">Hisoblash</button></div><div class="cards" style="margin-top:15px"><div class="card"><span>KIRIM</span><b id="fIncome">0</b></div><div class="card"><span>XARAJAT</span><b id="fExpense">0</b></div><div class="card"><span>ISHCHI TO‘LOV</span><b id="fSalary">0</b></div><div class="card"><span>BONUS</span><b id="fBonus">0</b></div><div class="card"><span>SOF FOYDA</span><b id="fProfit">0</b></div></div></div></section>
-
-<section id="customerPro" class="tab"><div class="grid"><div class="panel"><h3>Mijoz bahosi</h3><form id="ratingForm"><label>Buyurtma<select class="orderSelect" name="buyurtma_id" required></select></label><label>Mebel sifati (1-5)<input type="number" min="1" max="5" name="sifat" value="5"></label><label>Muddat (1-5)<input type="number" min="1" max="5" name="muddat" value="5"></label><label>Muomala (1-5)<input type="number" min="1" max="5" name="muomala" value="5"></label><label>Yetkazish (1-5)<input type="number" min="1" max="5" name="yetkazish" value="5"></label><label>Montaj (1-5)<input type="number" min="1" max="5" name="montaj" value="5"></label><label>Izoh<textarea name="izoh"></textarea></label><button>Bahoni saqlash</button><div class="msg"></div></form><hr><h3>Qo‘shimcha ish</h3><form id="extraForm"><label>Buyurtma<select class="orderSelect" name="buyurtma_id" required></select></label><label>Ish nomi<input name="nomi" required></label><label>Qo‘shimcha summa<input type="number" name="summa"></label><label>Qo‘shimcha kun<input type="number" name="qoshimcha_kun"></label><label>Izoh<input name="izoh"></label><button>Qo‘shish</button><div class="msg"></div></form></div><div class="panel tablewrap"><h3>Qo‘shimcha ishlar</h3><table><thead><tr><th>Buyurtma</th><th>Mijoz</th><th>Ish</th><th>Summa</th><th>Kun</th></tr></thead><tbody id="extrasBody"></tbody></table></div></div></section>
-<section id="service" class="tab"><div class="grid"><div class="panel"><h3>Servis / kafolat murojaati</h3><form id="serviceForm"><label>Buyurtma<select class="orderSelect" name="buyurtma_id" required></select></label><label>Turi<select name="turi"><option>Kafolat</option><option>Servis</option><option>Pullik xizmat</option></select></label><label>Muammo<textarea name="muammo" required></textarea></label><label>Servis sanasi<input type="date" name="servis_sana"></label><label>Usta<input name="usta"></label><button>Qabul qilish</button><div class="msg"></div></form></div><div class="panel tablewrap"><table><thead><tr><th>Buyurtma</th><th>Mijoz</th><th>Turi</th><th>Muammo</th><th>Holat</th><th>Sana</th><th>Usta</th></tr></thead><tbody id="serviceBody"></tbody></table></div></div></section>
-<section id="delivery" class="tab"><div class="grid"><div class="panel"><h3>Yetkazishni rejalash</h3><form id="deliveryForm"><label>Buyurtma<select class="orderSelect" name="buyurtma_id" required></select></label><label>Haydovchi<select class="workerSelect" name="haydovchi_id"></select></label><label>Sana<input type="date" name="sana" required></label><label>Navbat<input type="number" name="navbat" value="1"></label><label>Mashina<input name="mashina"></label><label>Benzin<input type="number" name="benzin"></label><label>Yo‘l xarajati<input type="number" name="yol_xarajati"></label><label>Izoh<input name="izoh"></label><button>Rejalash</button><div class="msg"></div></form></div><div class="panel tablewrap"><table><thead><tr><th>Sana</th><th>Navbat</th><th>Buyurtma</th><th>Mijoz</th><th>Haydovchi</th><th>Manzil</th><th>Holat</th><th>Amal</th></tr></thead><tbody id="deliveryBody"></tbody></table></div></div></section>
-
-</main>
-
-<div id="stageModal" style="display:none;position:fixed;inset:0;background:#0009;z-index:20;place-items:center">
-<div class="panel" style="width:min(420px,92%);max-height:85vh;overflow:auto"><h3>Buyurtma bosqichlari</h3><div id="stageList"></div><button onclick="closeStage()" style="margin-top:10px">Yopish</button></div>
-</div>
-
-<script>
-const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s);
-function tashkentDate(){const p=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tashkent',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());const v=Object.fromEntries(p.map(x=>[x.type,x.value]));return `${v.year}-${v.month}-${v.day}`}const today=tashkentDate();$$('input[type=date]').forEach(x=>x.value=today);
-$$('.tabs button').forEach(b=>b.onclick=()=>{$$('.tabs button').forEach(x=>x.classList.remove('active'));$$('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#'+b.dataset.tab).classList.add('active')});
-function esc(s){return String(s===undefined||s===null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-async function api(u,o){const r=await fetch(u,o),j=await r.json();if(!r.ok)throw new Error(j.message||'Xato');return j}
-function fj(f){return Object.fromEntries(new FormData(f).entries())}
-function bind(id,url){const f=$(id);f.onsubmit=async e=>{e.preventDefault();const m=f.querySelector('.msg');try{await api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(fj(f))});m.textContent='✅ Saqlandi';await refresh()}catch(x){m.textContent='❌ '+x.message}}}
-function money(v){return Number(v||0).toLocaleString('uz-UZ',{maximumFractionDigits:2})}
-
-async function loadWorkers(){const a=await api('/api/ishchilar');$('#workersBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.lavozim||'')}</td><td>${esc(x.staj_yil)} yil</td><td>${money(x.kunlik_stavka)}</td><td>${money(x.oylik_maosh)}</td><td><button class="danger" onclick="delWorker(${esc(x.id)})">O‘chirish</button></td></tr>`).join('');$$('.workerSelect').forEach(s=>s.innerHTML='<option value="">Tanlang</option>'+a.map(x=>`<option value="${esc(x.id)}">${esc(x.ism)} ${esc(x.familiya||'')}</option>`).join(''))}
-async function delWorker(i){if(confirm('O‘chirasizmi?')){await api('/api/ishchilar/'+i,{method:'DELETE'});refresh()}}
-async function loadTypes(){const a=await api('/api/ish-turlari');$('#workTypeSelect').innerHTML=a.map(x=>`<option value="${esc(x.id)}">${esc(x.kategoriya)} — ${esc(x.nomi)} (${esc(x.birlik)})</option>`).join('')}
-async function loadAttendance(){const a=await api('/api/keldi-ketdi');$('#attendanceBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td>${esc(x.keldi_vaqti)}</td><td>${esc(x.ketdi_vaqti)}</td><td>${esc(x.ish_soatlari)}</td></tr>`).join('')}
-async function loadResults(){const a=await api('/api/natijalar');$('#resultsBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.ish_turi)}</td><td>${esc(x.sana)}</td><td>${esc(x.miqdor)} ${esc(x.birlik)}</td><td>${money(x.jami_haq)}</td><td>${esc(x.buyurtma_kodi||'')}</td></tr>`).join('')}
-async function loadOrders(){const a=await api('/api/buyurtmalar');$$('.orderSelect').forEach(s=>s.innerHTML='<option value="">Tanlang</option>'+a.map(x=>`<option value="${esc(x.id)}">${esc(x.kod)} — ${esc(x.mijoz)}</option>`).join(''));$('#ordersBody').innerHTML=a.map(x=>`<tr><td>${esc(x.kod)}</td><td>${esc(x.mijoz)}</td><td>${esc(x.mahsulot||'')}</td><td>${money(x.umumiy_narx)}</td><td>${money(x.oldindan_tolov)}</td><td class="balance">${money(x.qoldiq)}</td><td><span class="badge">${esc(x.holat)}</span></td><td><span id="pr${esc(x.id)}">0%</span></td><td><button onclick="openStage(${esc(x.id)})">Ko‘rish</button></td><td><button onclick="addOrderPayment(${esc(x.id)})">To‘lov</button></td><td><a href="/buyurtma/${esc(x.id)}/shartnoma.docx"><button>Word</button></a> <a href="/buyurtma/${esc(x.id)}/shartnoma.pdf" target="_blank"><button>PDF</button></a> <button onclick="regenContract(${esc(x.id)})">Yangilash</button> <a href="/buyurtma/${esc(x.id)}/chek.pdf" target="_blank"><button>Chek</button></a> <a href="/buyurtma/${esc(x.id)}/qr.png" target="_blank"><button class="ok">QR</button></a> <button onclick="copyTrack(${esc(x.id)})">Link</button></td></tr>`).join('')}
-async function openStage(id){const a=await api('/api/buyurtma/'+id+'/bosqichlar');$('#stageList').innerHTML=a.map(x=>`<label class="stage"><input type="checkbox" ${x.bajarildi?'checked':''} onchange="toggleStage(${esc(x.id)},this.checked)"> ${esc(x.bosqich)}</label>`).join('');$('#stageModal').style.display='grid'}
-function closeStage(){$('#stageModal').style.display='none'}
-async function toggleStage(id,v){await api('/api/buyurtma-bosqich/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bajarildi:v})})}
-async function loadStock(){const a=await api('/api/ombor');$('#stockSelect').innerHTML=a.map(x=>`<option value="${esc(x.id)}">${esc(x.nomi)} (${esc(x.birlik)})</option>`).join('');$('#stockBody').innerHTML=a.map(x=>`<tr class="${Number(x.qoldiq)<=Number(x.min_qoldiq)?'low':''}"><td>${esc(x.nomi)}</td><td>${esc(x.kategoriya)}</td><td>${esc(x.qoldiq)}</td><td>${esc(x.birlik)}</td><td>${esc(x.min_qoldiq)}</td></tr>`).join('')}
-async function loadTrips(){const a=await api('/api/safarlar');$('#tripsBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td>${esc(x.mashina||'')}</td><td>${esc(x.qayerdan||'')} → ${esc(x.qayerga||'')}</td><td>${esc(x.masofa_km)}</td><td>${esc(x.sabab||'')}</td><td>${money(x.xarajat)}</td></tr>`).join('')}
-async function loadPayments(){const a=await api('/api/tolovlar');$('#paymentsBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td>${money(x.miqdor)}</td><td>${esc(x.turi)}</td></tr>`).join('')}
-async function loadPenalties(){const a=await api('/api/jarimalar');$('#penaltiesBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td class="minus">${money(x.miqdor)}</td><td>${esc(x.sababi||'')}</td></tr>`).join('')}
-async function loadDashboard(){const x=await api('/api/dashboard');$('#dWorkers').textContent=x.workers;$('#dOrders').textContent=x.orders;$('#dHours').textContent=x.hours;$('#dProduction').textContent=x.production;$('#dKm').textContent=x.km;$('#dLow').textContent=x.low_stock}
-function setMonth(){const d=new Date(),y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0');$('#totalStart').value=`${y}-${m}-01`;$('#totalEnd').value=new Date(y,d.getMonth()+1,0).toISOString().slice(0,10);loadTotals()}
-async function loadTotals(){const s=$('#totalStart').value||'1900-01-01',e=$('#totalEnd').value||'2999-12-31';$('#csvLink').href=`/export/jami.csv?start=${s}&end=${e}`;const a=await api(`/api/jami?start=${s}&end=${e}`);$('#totalsBody').innerHTML=a.map((x,i)=>`<tr><td>${i+1}</td><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.lavozim||'')}</td><td>${esc(x.ish_kunlari)}</td><td>${esc(x.jami_soat)}</td><td>${esc(x.jami_miqdor)}</td><td class="money">${money(x.ish_haqi)}</td><td class="minus">${money(x.jarima)}</td><td class="money">${money(x.bonus)}</td><td>${money(x.tolangan)}</td><td class="balance">${money(x.qoldiq)}</td><td>${esc(x.reyting)}</td></tr>`).join('')}
-
-async function loadExpenses(){const a=await api('/api/xarajatlar');$('#expensesBody').innerHTML=a.map(x=>`<tr><td>${esc(x.sana)}</td><td>${esc(x.kategoriya)}</td><td>${esc(x.xarajat_nomi||'')}</td><td class="minus">${money(x.miqdor)}</td><td>${esc(x.tolov_usuli||'Naqd')}</td><td>${esc(x.buyurtma_kodi||'')}</td><td>${esc(x.kimga_berildi||'')}</td><td>${esc(x.tavsifi||'')}</td></tr>`).join('')}
-async function clockIn(){const id=$('#autoWorkerSelect').value,m=$('#attendanceAutoMsg');if(!id){m.textContent='Ishchini tanlang';return}try{const x=await api('/api/davomat/keldi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ishchi_id:id})});m.textContent=`✅ Keldi: ${esc(x.sana)} ${esc(x.vaqt)}`;loadAttendance();loadDashboard()}catch(e){m.textContent='❌ '+e.message}}
-async function clockOut(){const id=$('#autoWorkerSelect').value,m=$('#attendanceAutoMsg');if(!id){m.textContent='Ishchini tanlang';return}try{const x=await api('/api/davomat/ketdi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ishchi_id:id})});m.textContent=`✅ Ketdi: ${esc(x.sana)} ${esc(x.vaqt)} — ${esc(x.ish_soatlari)} soat`;loadAttendance();loadDashboard()}catch(e){m.textContent='❌ '+e.message}}
-async function loadBonuses(){const a=await api('/api/bonuslar');$('#bonusesBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td class="money">${money(x.miqdor)}</td><td>${esc(x.sababi||'')}</td></tr>`).join('')}
-async function loadStatuses(){const a=await api('/api/ishchi-holatlari');$('#statusesBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td>${esc(x.turi)}</td><td>${esc(x.izoh||'')}</td></tr>`).join('')}
-async function loadFinished(){const a=await api('/api/tayyor-mahsulot');$('#finishedBody').innerHTML=a.map(x=>`<tr><td>${esc(x.nomi)}</td><td>${esc(x.kodi||'')}</td><td>${esc(x.rang||'')}</td><td>${esc(x.miqdor)} ${esc(x.birlik)}</td><td>${money(x.narx)}</td></tr>`).join('')}
-async function loadFinance(){const s=$('#finStart').value||'1900-01-01',e=$('#finEnd').value||'2999-12-31',x=await api(`/api/moliyaviy-xulosa?start=${s}&end=${e}`);$('#fIncome').textContent=money(x.kirim);$('#fExpense').textContent=money(x.xarajat);$('#fSalary').textContent=money(x.ishchi_tolov);$('#fBonus').textContent=money(x.bonus);$('#fProfit').textContent=money(x.sof_foyda)}
-async function addOrderPayment(id){const miqdor=prompt('To‘lov summasi');if(!miqdor)return;await api(`/api/buyurtma/${id}/tolovlar`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sana:today,miqdor})});refresh()}
-async function regenContract(id){try{const x=await api(`/buyurtma/${id}/shartnoma-yaratish`,{method:'POST'});alert('Shartnoma yangilandi. Versiya: '+x.versiya)}catch(e){alert('Xato: '+e.message)}}
-async function copyTrack(id){const x=await api(`/api/buyurtma/${id}/link`);try{await navigator.clipboard.writeText(x.url);alert('Mijoz kuzatuv havolasi nusxalandi')}catch(e){prompt('Havolani nusxalang:',x.url)}}
-async function loadProgress(){const rows=await api('/api/buyurtmalar');for(const x of rows){try{const p=await api(`/api/buyurtma-progress/${esc(x.id)}`),el=$(`#pr${esc(x.id)}`);if(el)el.textContent=p.foiz+'%'}catch(e){}}}
-
-
-async function loadExtras(){const a=await api('/api/qoshimcha-ish');$('#extrasBody').innerHTML=a.map(x=>`<tr><td>${esc(x.kod)}</td><td>${esc(x.mijoz)}</td><td>${esc(x.nomi)}</td><td>${money(x.summa)}</td><td>${esc(x.qoshimcha_kun)}</td></tr>`).join('')}
-async function loadService(){const a=await api('/api/servis');$('#serviceBody').innerHTML=a.map(x=>`<tr><td>${esc(x.kod)}</td><td>${esc(x.mijoz)}</td><td>${esc(x.turi)}</td><td>${esc(x.muammo)}</td><td><span class="badge">${esc(x.holat)}</span></td><td>${esc(x.servis_sana||'')}</td><td>${esc(x.usta||'')}</td></tr>`).join('')}
-async function loadDelivery(){const a=await api('/api/yetkazish');$('#deliveryBody').innerHTML=a.map(x=>`<tr><td>${esc(x.sana)}</td><td>${esc(x.navbat)}</td><td>${esc(x.kod)}</td><td>${esc(x.mijoz)}</td><td>${esc(x.haydovchi_ism||'')} ${esc(x.haydovchi_familiya||'')}</td><td>${x.lokatsiya?`<a href="${esc(x.lokatsiya)}" target="_blank">Xarita</a>`:esc(x.manzil||'')}</td><td>${esc(x.holat)}</td><td><button onclick="deliveryState(${esc(x.id)},'Yo‘lga chiqdim')">Yo‘lga</button> <button class="ok" onclick="deliveryState(${esc(x.id)},'Yetkazib berdim')">Topshirildi</button></td></tr>`).join('')}
-async function deliveryState(id,holat){await api(`/api/yetkazish/${id}/holat`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({holat})});loadDelivery()}
-
-async function refresh(){await Promise.all([loadWorkers(),loadTypes(),loadAttendance(),loadResults(),loadOrders(),loadStock(),loadTrips(),loadPayments(),loadPenalties(),loadDashboard(),loadTotals(),loadExpenses(),loadBonuses(),loadStatuses(),loadFinished(),loadFinance(),loadProgress(),loadExtras(),loadService(),loadDelivery()])}
-const rf=$('#ratingForm');rf.onsubmit=async e=>{e.preventDefault();const d=fj(rf),id=d.buyurtma_id;delete d.buyurtma_id;const m=rf.querySelector('.msg');try{await api(`/api/buyurtma/${id}/baho`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});m.textContent='✅ Baho saqlandi'}catch(x){m.textContent='❌ '+x.message}};
-bind('#extraForm','/api/qoshimcha-ish');bind('#serviceForm','/api/servis');bind('#deliveryForm','/api/yetkazish');
-bind('#workerForm','/api/ishchilar');bind('#attendanceForm','/api/keldi-ketdi');bind('#resultForm','/api/natijalar');bind('#orderForm','/api/buyurtmalar');bind('#stockForm','/api/ombor-harakat');bind('#tripForm','/api/safarlar');bind('#paymentForm','/api/tolovlar');bind('#penaltyForm','/api/jarimalar');bind('#expenseForm','/api/xarajatlar');bind('#bonusForm','/api/bonuslar');bind('#statusForm','/api/ishchi-holatlari');bind('#finishedForm','/api/tayyor-mahsulot');setMonth();$('#finStart').value=$('#totalStart').value;$('#finEnd').value=$('#totalEnd').value;refresh();
-</script>
-<script>
-(function(){
-  const DAYS=["Yakshanba","Dushanba","Seshanba","Chorshanba","Payshanba","Juma","Shanba"];
-  const MONTHS=["yanvar","fevral","mart","aprel","may","iyun","iyul","avgust","sentabr","oktabr","noyabr","dekabr"];
-  function two(n){return String(n).padStart(2,"0")}
-  function updatePharmClock(){
-    const d=new Date(Date.now()+5*60*60*1000);
-    const time=two(d.getUTCHours())+":"+two(d.getUTCMinutes())+":"+two(d.getUTCSeconds());
-    const date=DAYS[d.getUTCDay()]+", "+d.getUTCDate()+" "+MONTHS[d.getUTCMonth()]+" "+d.getUTCFullYear();
-    const clock=document.getElementById("pharmClock");
-    const dateBox=document.getElementById("pharmDate");
-    if(clock) clock.textContent=time;
-    if(dateBox) dateBox.textContent=date+" · Toshkent";
-  }
-  updatePharmClock();
-  setInterval(updatePharmClock,1000);
-})();
-</script>
-</body></html>
-"""
-
-# Gunicorn modulni import qilganda ham bazani tayyorlash
 init_db()
+create_database_backup()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",5000)), debug=False)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")), debug=False)
