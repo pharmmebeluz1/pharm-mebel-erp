@@ -1,0 +1,31 @@
+MEBEL360° — MIJOZ KUZATUV KARTASI
+
+YANGI FUNKSIYALAR:
+1. Mijozga aniq rang, rang kodi, material va yaltiroqlik ko‘rinadi.
+2. Umumiy narx, to‘langan pul va qoldiq pul ko‘rinadi.
+3. Tayyor bo‘lish sanasi va soati bo‘yicha hisoblagich har soniyada orqaga yuradi.
+4. Hisoblagich ranglari:
+   - 3 kundan ko‘p: yashil
+   - 1–3 kun: sariq
+   - 24 soatdan kam: to‘q sariq
+   - muddat o‘tgan: qizil va “kechikdi” yozuvi
+5. Buyurtma tayyor bo‘lsa “Buyurtmangiz tayyor” deb chiqadi.
+6. Bosqichlar, jarayon foizi va bosqich tugagan vaqtlar ko‘rinadi.
+7. Rasm/video havolalari mijoz oynasiga qo‘shiladi.
+8. Mijoz rang, chizma, material, narx yoki muddatni tasdiqlashi mumkin.
+9. Yetkazish va shofyor holati ko‘rinadi.
+10. To‘lov, bosqich va muddat o‘zgarishlari tarixi saqlanadi.
+
+QANDAY ISHLATILADI:
+- Buyurtmalar bo‘limida kerakli buyurtma qatoridan “Sozlash” tugmasini bosing.
+- Sana, soat, rang, material, mijozga izoh va aloqa telefonini kiriting.
+- Rasm/video qo‘shish uchun internetdagi to‘g‘ridan-to‘g‘ri havolani kiriting.
+- Tasdiq kerak bo‘lsa turini va savolni tanlang.
+- “Saqlash”ni bosing.
+- “Ochish” tugmasi mijoz ko‘radigan sahifani ochadi.
+- “Link” tugmasi mijozga yuboriladigan havolani nusxalaydi.
+
+MUHIM:
+- GitHubga ZIPning o‘zini emas, ZIP ichidagi barcha fayl va papkalarni yuklang.
+- Renderda Manual Deploy → Deploy latest commit ni bosing.
+- Renderdagi Disk va mavjud ma’lumotlar bazasini o‘chirmang.

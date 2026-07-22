@@ -1,0 +1,69 @@
+MEBEL360° — DINAMIK BUYURTMA JARAYONI
+======================================
+
+YANGI QO‘SHILGAN FUNKSIYALAR
+
+1. Buyurtma turiga qarab bosqichlar avtomatik tanlanadi:
+   - To‘liq mebel
+   - Faqat oyna
+   - MDF fasad
+   - Ta’mirlash
+   - Aralash buyurtma
+   - Maxsus bosqichlar
+
+2. “Faqat oyna” buyurtmasining bosqichlari:
+   O‘lchov olindi → Chizma tayyorlandi → Hisob-kitob jarayonda →
+   Mijoz tasdiqladi → To‘lov sharti → Oynaga buyurtma berildi →
+   Kesildi → Qirralari ishlov berildi → Teshik ochildi →
+   Sifat nazorati → Yetkazish/o‘rnatish → Yakunlandi.
+
+3. To‘lov shartlari:
+   - Avans majburiy
+   - Qisman avans
+   - Avans talab qilinmaydi — ishonchli mijoz
+   - Muddatli to‘lov
+   - Shartnoma asosida to‘lov
+
+4. Oddiy mijozda rasmiy muddat talab qilinadigan avans summasi
+   to‘langandan keyin avtomatik boshlanadi.
+
+5. Ishonchli mijozda:
+   Mijoz tasdiqladi → Avans talab qilinmaydi → Rahbar tasdiqladi →
+   rasmiy muddat boshlanadi.
+
+6. Rasmiy muddat boshlanmasdan ishlab chiqarish bosqichlarini
+   tasodifan belgilashga yo‘l qo‘yilmaydi.
+
+7. Mijoz oynasida:
+   - buyurtma turi;
+   - to‘lov sharti;
+   - rasmiy muddat boshlanmagan bo‘lsa sababi;
+   - narx taklifi amal qilish sanasi;
+   - avans muddati;
+   - rang, pul, bosqichlar va soniyali hisoblagich ko‘rinadi.
+
+8. Eski buyurtmalar va eski jadval ma’lumotlari o‘chirilmaydi.
+   Yangi ustunlar dastur ishga tushganda bazaga xavfsiz qo‘shiladi.
+
+ISHLATISH TARTIBI
+
+A) Oddiy mijoz:
+   1. Yangi buyurtmada buyurtma turini tanlang.
+   2. “Avans majburiy” yoki “Qisman avans”ni tanlang.
+   3. Talab qilinadigan avans summasini kiriting.
+   4. Ishlab chiqarish muddatini kunlarda kiriting.
+   5. To‘lov tugmasidan avans kiriting.
+   6. Avans talabga yetganda muddat avtomatik boshlanadi.
+
+B) Ishonchli mijoz:
+   1. “Avans talab qilinmaydi — ishonchli mijoz”ni tanlang.
+   2. Buyurtma bosqichlaridagi “Ko‘rish” tugmasini bosing.
+   3. “Rahbar tasdiqladi” tugmasini bosing.
+   4. Shundan keyin rasmiy muddat va ishlab chiqarish boshlanadi.
+
+MUHIM
+- GitHubga ZIP faylning o‘zini emas, ZIP ichidagi barcha fayl va
+  papkalarni yuklang.
+- Render Disk va mavjud ma’lumotlar bazasini o‘chirmang.
+- Deploydan keyin telefondagi eski ilovani qayta o‘rnatish shart emas;
+  PWA kesh versiyasi yangilangan. Zarur bo‘lsa sahifani qayta oching.
