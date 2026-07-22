@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: mebel360-platform
+    name: mebel360-konstruktor
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
@@ -9,5 +9,7 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.8
-      - key: MEBEL360_SECRET
+      - key: MEBEL360_COOKIE_SECURE
+        value: "1"
+      - key: MEBEL360_KROY_SECRET
         generateValue: true

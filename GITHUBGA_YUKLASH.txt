@@ -1,0 +1,15 @@
+MEBEL360° — GITHUB VA RENDERGA YUKLASH
+
+1. Shu ZIP faylni oching.
+2. Ichidagi HAMMA fayl va static papkasini GitHubdagi pharm-mebel-erp loyihasining asosiy joyiga yuklang.
+3. Izohga yozing:
+   Mebel360° eski to‘liq dizayn, yangi logo va bosqich yangilanishi qo‘shildi
+4. Commit changes tugmasini bosing.
+5. Render → pharm-mebel-erp → Manual Deploy → Deploy latest commit.
+6. Deploy live chiqqach saytni Ctrl+F5 bilan yangilang.
+7. Telefonda eski ilovani o‘chirib, saytni Chrome orqali qayta oching va Ilovani o‘rnatish ni bosing.
+
+MUHIM:
+- Renderdagi Diskni o‘chirmang.
+- GitHubga .db ma’lumotlar bazasi yuklanmaydi; mavjud baza va buyurtmalar saqlanishi uchun PHARM_ERP_DB sozlamasini o‘zgartirmang.
+- Bu paket eski to‘liq dizaynni saqlaydi. Soddalashtirilgan yangi bosh sahifa bilan almashtirmang.
