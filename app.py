@@ -1,99 +1,63 @@
 # -*- coding: utf-8 -*-
-"""Mebel360° Excel moduli — avtomatik o‘rnatgich."""
+"""Mebel360° — Flask/PWA starter web application.
+
+The uploaded package contained an Excel-module installer as app.py rather than a
+Flask application. That installer is preserved as excel_module_installer.py.
+This file provides a working web/PWA shell for Render, phone and desktop use.
+"""
 from __future__ import annotations
 
-import shutil
-import subprocess
-import sys
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
+from flask import Flask, jsonify, make_response, render_template, send_from_directory
 
-MARKER_START = "# MEBEL360_EXCEL_MODULE_START"
-MARKER_END = "# MEBEL360_EXCEL_MODULE_END"
-INJECTION = f"""
-{MARKER_START}
-try:
-    from mebel360_excel_modul import register_excel_module
-    register_excel_module(app, get_db)
-except Exception as _m360_excel_error:
-    print("Mebel360 Excel modul xatosi:", _m360_excel_error)
-{MARKER_END}
+BASE_DIR = Path(__file__).resolve().parent
 
-"""
+app = Flask(__name__, static_folder="static", template_folder="templates")
+app.config.update(
+    SECRET_KEY=os.environ.get("MEBEL360_SECRET", "change-this-in-production"),
+    JSON_AS_ASCII=False,
+)
 
 
-def main() -> int:
-    folder = Path(__file__).resolve().parent
-    app_path = folder / "app.py"
-    module_path = folder / "mebel360_excel_modul.py"
+@app.get("/")
+def home():
+    return render_template("index.html", year=datetime.now().year)
 
-    print("=" * 62)
-    print(" Mebel360° — Excel moliyaviy hisobot modulini o‘rnatish")
-    print("=" * 62)
 
-    if not app_path.exists():
-        print("XATO: app.py topilmadi.")
-        print("Bu fayllarni app.py turgan papkaga qo‘ying.")
-        return 1
-    if not module_path.exists():
-        print("XATO: mebel360_excel_modul.py topilmadi.")
-        return 1
+@app.get("/api/health")
+def health():
+    return jsonify(
+        status="ok",
+        app="Mebel360°",
+        time=datetime.now(timezone.utc).isoformat(),
+    )
 
-    # openpyxl o‘rnatiladi.
-    try:
-        import openpyxl  # noqa: F401
-        print("openpyxl mavjud.")
-    except ImportError:
-        print("openpyxl o‘rnatilmoqda...")
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl>=3.1.2"])
-        except Exception as exc:
-            print("XATO: openpyxl o‘rnatilmadi:", exc)
-            print("Internetni tekshirib, yana ishga tushiring.")
-            return 1
 
-    text = app_path.read_text(encoding="utf-8-sig")
-    if MARKER_START in text:
-        print("Excel moduli oldin o‘rnatilgan. Qayta o‘rnatish shart emas.")
-    else:
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup = folder / f"app_excel_oldidan_{stamp}.py"
-        shutil.copy2(app_path, backup)
-        print("Zaxira nusxa:", backup.name)
+@app.get("/manifest.webmanifest")
+def manifest():
+    response = make_response(send_from_directory(app.static_folder, "manifest.webmanifest"))
+    response.headers["Content-Type"] = "application/manifest+json"
+    response.headers["Cache-Control"] = "no-cache"
+    return response
 
-        import re
-        match = re.search(
-            r"(?m)^\s*if\s+__name__\s*==\s*(['\"])__main__\1\s*:",
-            text,
-        )
-        if not match:
-            print("XATO: app.py oxiridagi ishga tushirish qismi topilmadi.")
-            print("app.py o‘zgartirilmadi.")
-            return 1
 
-        text = text[:match.start()] + INJECTION + text[match.start():]
-        app_path.write_text(text, encoding="utf-8")
-        print("app.py muvaffaqiyatli yangilandi.")
+@app.get("/service-worker.js")
+def service_worker():
+    response = make_response(send_from_directory(app.static_folder, "service-worker.js"))
+    response.headers["Content-Type"] = "application/javascript; charset=utf-8"
+    response.headers["Service-Worker-Allowed"] = "/"
+    response.headers["Cache-Control"] = "no-cache"
+    return response
 
-    # Render va boshqa serverlar uchun requirements.txt yangilanadi.
-    req_path = folder / "requirements.txt"
-    req_text = req_path.read_text(encoding="utf-8") if req_path.exists() else ""
-    if "openpyxl" not in req_text.lower():
-        if req_text and not req_text.endswith("\n"):
-            req_text += "\n"
-        req_text += "openpyxl>=3.1.2\n"
-        req_path.write_text(req_text, encoding="utf-8")
-        print("requirements.txt ga openpyxl qo‘shildi.")
 
-    print()
-    print("TAYYOR!")
-    print("1) Mebel360° dasturini qayta ishga tushiring.")
-    print("2) Rahbar kabinetiga kiring.")
-    print("3) Past chapdagi «📊 Excel hisobot» tugmasini bosing.")
-    print("4) Sana oralig‘ini tanlab Excelni yuklang.")
-    return 0
+@app.get("/offline.html")
+def offline():
+    return send_from_directory(app.static_folder, "offline.html")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port, debug=os.environ.get("FLASK_DEBUG") == "1")

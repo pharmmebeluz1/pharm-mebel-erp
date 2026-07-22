@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0a3d78">
+  <meta name="description" content="Mebel360° — mebel korxonasini 360 darajada boshqarish platformasi">
+  <title>Mebel360°</title>
+  <link rel="manifest" href="/manifest.webmanifest?v=1.0.0">
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='assets/favicon.png') }}?v=1.0.0">
+  <link rel="apple-touch-icon" href="{{ url_for('static', filename='assets/icon-192.png') }}?v=1.0.0">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}?v=1.0.0">
+</head>
+<body>
+  <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
+  <header class="topbar">
+    <div class="brand-mini">
+      <img src="{{ url_for('static', filename='assets/icon-192.png') }}" alt="Mebel360°">
+      <div><strong>Mebel360°</strong><span>Boshqaruv platformasi</span></div>
+    </div>
+    <button id="installBtn" class="install ghost" hidden>📲 Ilovani o‘rnatish</button>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="logo-card">
+        <img class="main-logo" src="{{ url_for('static', filename='assets/mebel360-logo.png') }}" alt="Mebel360° logosi">
+      </div>
+      <div class="hero-copy">
+        <span class="eyebrow">MEBEL ISHLAB CHIQARISH UCHUN</span>
+        <h1>Korxonangizni <em>360°</em> nazorat qiling</h1>
+        <p>Buyurtma, konstruktor, ishlab chiqarish, ombor, moliya va mijoz jarayonlarini bitta qulay platformada boshqarish uchun tayyor mobil qobiq.</p>
+        <div class="actions">
+          <button id="installBtnHero" class="install primary" hidden>Telefonga o‘rnatish</button>
+          <a href="#modules" class="secondary">Bo‘limlarni ko‘rish</a>
+        </div>
+        <p id="installHelp" class="install-help">Android Chrome menyusidan <b>“Ilovani o‘rnatish”</b> ni tanlang.</p>
+      </div>
+    </section>
+
+    <section class="stats" aria-label="Platforma holati">
+      <article><b>360°</b><span>to‘liq nazorat</span></article>
+      <article><b>PWA</b><span>telefon va kompyuter</span></article>
+      <article><b>24/7</b><span>onlayn kirish</span></article>
+      <article><b>1.0</b><span>mobil qobiq</span></article>
+    </section>
+
+    <section id="modules" class="modules">
+      <div class="section-head"><span>ASOSIY YO‘NALISHLAR</span><h2>Mebel360° bo‘limlari</h2></div>
+      <div class="grid">
+        <button class="module" data-module="Buyurtmalar"><i>📋</i><b>Buyurtmalar</b><span>Mijoz va loyiha bosqichlari</span></button>
+        <button class="module" data-module="Konstruktor"><i>📐</i><b>Konstruktor</b><span>Chizma, detal va kroy</span></button>
+        <button class="module" data-module="Ishlab chiqarish"><i>🏭</i><b>Ishlab chiqarish</b><span>Ishchi va jarayon nazorati</span></button>
+        <button class="module" data-module="Ombor"><i>📦</i><b>Ombor</b><span>Material kirim-chiqimi</span></button>
+        <button class="module" data-module="Moliya"><i>📊</i><b>Moliya</b><span>Kirim, chiqim va hisobot</span></button>
+        <button class="module" data-module="Mijoz kabineti"><i>👤</i><b>Mijoz kabineti</b><span>Buyurtmani kuzatish</span></button>
+      </div>
+    </section>
+  </main>
+
+  <footer>© {{ year }} Mebel360°. Barcha huquqlar himoyalangan.</footer>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="{{ url_for('static', filename='app.js') }}?v=1.0.0" defer></script>
+</body>
+</html>
