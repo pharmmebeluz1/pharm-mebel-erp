@@ -248,19 +248,36 @@ async function confirmContract() {
 async function selectRole(role, card) {
   document.querySelectorAll(".role-card").forEach((item) => item.classList.remove("featured"));
   card.classList.add("featured");
+  card.disabled = true;
   try {
     const result = await readJson(await fetch("/api/select-role", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role })
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
+      body: JSON.stringify({ role }),
+      cache: "no-store"
     }));
     const roleName = card.querySelector("strong").textContent;
     showToast(`${roleName} ${translations[currentLanguage].roleSelected}`);
-    if (role === "customer") {
-      setTimeout(() => { showScreen("contractScreen"); loadCustomerContract(); }, 280);
-    } else if (role === "manager" || role === "admin") {
-      currentStaffRole = role;
-      setTimeout(() => { showScreen("staffSupportScreen"); loadStaffInbox(); }, 280);
+
+    const nextScreen = result.next_screen;
+    if (nextScreen === "contractScreen") {
+      showScreen("contractScreen");
+      await loadCustomerContract();
+      return;
     }
-  } catch (error) { showToast(error.message); }
+    if (nextScreen === "staffSupportScreen") {
+      currentStaffRole = role;
+      showScreen("staffSupportScreen");
+      await loadStaffInbox();
+      return;
+    }
+
+    showToast(`${roleName} bo‘limi keyingi bosqichda ulanadi.`);
+  } catch (error) {
+    showToast(error.message || "Bo‘limni ochishda xatolik yuz berdi.");
+  } finally {
+    card.disabled = false;
+  }
 }
 
 function messageHtml(message, mineRole) {
@@ -529,6 +546,19 @@ document.getElementById("staffAttachment").addEventListener("change", (event) =>
   document.getElementById("staffAttachmentName").textContent = event.target.files[0]?.name || translations[currentLanguage].attachFile;
 });
 
+// Dastur tez-tez yangilanayotgani uchun eski Service Worker va brauzer keshi tozalanadi.
+// Bu Admin/Menejer tugmasi eski JavaScript bilan qolib ketishining oldini oladi.
 if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => navigator.serviceWorker.register("/static/sw.js").catch(() => {}));
+  window.addEventListener("load", async () => {
+    try {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(registrations.map((registration) => registration.unregister()));
+    } catch (_) {}
+    try {
+      if ("caches" in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((key) => caches.delete(key)));
+      }
+    } catch (_) {}
+  });
 }

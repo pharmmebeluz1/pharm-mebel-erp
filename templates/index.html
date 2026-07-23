@@ -6,9 +6,9 @@
   <meta name="theme-color" content="#0ea85b">
   <meta name="description" content="Mebel360° mebel ishlab chiqarishni boshqarish tizimi">
   <title>Mebel360°</title>
-  <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
-  <link rel="icon" href="{{ url_for('static', filename='img/icon-192.png') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <link rel="manifest" href="{{ url_for('static', filename='manifest.json', v='20260723-6') }}">
+  <link rel="icon" href="{{ url_for('static', filename='img/icon-192.png', v='20260723-6') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='20260723-6') }}">
 </head>
 <body>
   <main class="app-shell" aria-live="polite">
@@ -19,7 +19,7 @@
     <section class="screen active" id="splashScreen" aria-label="Ochilish oynasi">
       <div class="splash-content">
         <div class="brand-block reveal delay-1">
-          <img class="brand-logo" src="{{ url_for('static', filename='img/mebel360-logo.jpg') }}" alt="Mebel360° logotipi">
+          <img class="brand-logo" src="{{ url_for('static', filename='img/mebel360-logo.jpg', v='20260723-6') }}" alt="Mebel360° logotipi">
           <p class="brand-tagline" data-i18n="tagline">MEBEL ISHLAB CHIQARISH BOSHQARUV TIZIMI</p>
         </div>
 
@@ -69,7 +69,7 @@
           <p data-i18n="loginSubtitle">Hisobingizga kiring</p>
         </div>
 
-        <img class="login-logo" src="{{ url_for('static', filename='img/mebel360-logo.jpg') }}" alt="Mebel360°">
+        <img class="login-logo" src="{{ url_for('static', filename='img/mebel360-logo.jpg', v='20260723-6') }}" alt="Mebel360°">
 
         <form id="loginForm" novalidate>
           <label class="field">
@@ -208,7 +208,7 @@
 
         <article class="contract-paper" id="contractPaper">
           <div class="contract-brand">
-            <img src="{{ url_for('static', filename='img/icon-192.png') }}" alt="Mebel360°">
+            <img src="{{ url_for('static', filename='img/icon-192.png', v='20260723-6') }}" alt="Mebel360°">
             <div>
               <strong>Mebel360°</strong>
               <span>Mebel ishlab chiqarish boshqaruv tizimi</span>
@@ -574,6 +574,6 @@
     <div id="toast" class="toast" role="status"></div>
   </main>
 
-  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/app.js', v='20260723-6') }}"></script>
 </body>
 </html>
