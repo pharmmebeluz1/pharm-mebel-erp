@@ -1,15 +1,12 @@
 services:
   - type: web
-    name: mebel360-konstruktor
+    name: mebel360-modern-login
     runtime: python
-    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 120
-    healthCheckPath: /api/health
+    startCommand: gunicorn app:app
+    healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
-        value: 3.12.8
-      - key: MEBEL360_COOKIE_SECURE
-        value: "1"
-      - key: MEBEL360_KROY_SECRET
+        value: 3.12.4
+      - key: SECRET_KEY
         generateValue: true
