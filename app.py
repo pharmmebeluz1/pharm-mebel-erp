@@ -5,15 +5,20 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request, session
+from flask import Flask, jsonify, render_template, request, send_from_directory, session
+from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("MEBEL360_DB", BASE_DIR / "mebel360_demo.db"))
+UPLOAD_DIR = Path(os.environ.get("MEBEL360_UPLOADS", BASE_DIR / "uploads"))
+ALLOWED_UPLOADS = {"png", "jpg", "jpeg", "webp", "pdf", "doc", "docx", "xls", "xlsx"}
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 TASHKENT = timezone(timedelta(hours=5), name="Asia/Tashkent")
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "mebel360-demo-secret-change-me")
 app.config["JSON_AS_ASCII"] = False
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 
 
 def now_tashkent() -> datetime:
@@ -81,6 +86,43 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT 'Tasdiqlash kutilmoqda',
                 FOREIGN KEY (order_id) REFERENCES orders(id)
             );
+
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL,
+                customer_id INTEGER NOT NULL,
+                topic TEXT NOT NULL DEFAULT 'Buyurtma jarayoni',
+                subject TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'Yangi',
+                priority TEXT NOT NULL DEFAULT 'Oddiy',
+                assigned_role TEXT NOT NULL DEFAULT 'manager',
+                escalated_to_admin INTEGER NOT NULL DEFAULT 0,
+                customer_unread INTEGER NOT NULL DEFAULT 0,
+                manager_unread INTEGER NOT NULL DEFAULT 1,
+                admin_unread INTEGER NOT NULL DEFAULT 0,
+                last_message_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                closed_at TEXT,
+                FOREIGN KEY (order_id) REFERENCES orders(id),
+                FOREIGN KEY (customer_id) REFERENCES customers(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS support_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                sender_role TEXT NOT NULL,
+                sender_name TEXT NOT NULL,
+                body TEXT NOT NULL DEFAULT '',
+                attachment_name TEXT,
+                attachment_path TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (ticket_id) REFERENCES support_tickets(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_support_tickets_last_message
+                ON support_tickets(last_message_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_support_messages_ticket
+                ON support_messages(ticket_id, created_at);
             """
         )
 
@@ -273,6 +315,166 @@ def get_customer_contract(username: str | None) -> dict | None:
     }
 
 
+def current_customer_context() -> dict | None:
+    contract = get_customer_contract(session.get("username"))
+    if contract is None:
+        return None
+    return contract
+
+
+def allowed_file(filename: str) -> bool:
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_UPLOADS
+
+
+def save_attachment(file_storage) -> tuple[str | None, str | None]:
+    if not file_storage or not file_storage.filename:
+        return None, None
+    original_name = secure_filename(file_storage.filename)
+    if not original_name or not allowed_file(original_name):
+        raise ValueError("Rasm, PDF yoki ofis hujjatini yuboring.")
+    file_storage.stream.seek(0, 2)
+    size = file_storage.stream.tell()
+    file_storage.stream.seek(0)
+    if size > MAX_UPLOAD_BYTES:
+        raise ValueError("Fayl hajmi 8 MB dan oshmasligi kerak.")
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = now_tashkent().strftime("%Y%m%d%H%M%S%f")
+    saved_name = f"{stamp}_{original_name}"
+    file_storage.save(UPLOAD_DIR / saved_name)
+    return file_storage.filename, saved_name
+
+
+def build_ai_acknowledgement(customer_name: str, topic: str, body: str) -> str:
+    """Mijoz murojaatiga darhol, mazmuniga mos odobli avtomatik javob tayyorlaydi."""
+    text = f"{topic} {body}".lower()
+    text = (
+        text.replace("’", "'")
+        .replace("ʻ", "'")
+        .replace("‘", "'")
+        .replace("`", "'")
+    )
+
+    reply_topic = "Murojaatingiz"
+    keyword_groups = [
+        (("rang", "tus", "bo'yoq", "bo‘yoq", "color", "цвет"), "Rang masalasi bo‘yicha xabaringiz"),
+        (("chizma", "o'lchov", "o‘lchov", "razmer", "dizayn", "eskiz"), "Chizma va o‘lchov masalasi bo‘yicha xabaringiz"),
+        (("to'lov", "to‘lov", "pul", "avans", "qoldiq", "hisob", "payment"), "To‘lov masalasi bo‘yicha xabaringiz"),
+        (("yetkaz", "montaj", "o'rnat", "o‘rnat", "manzil"), "Yetkazish va o‘rnatish bo‘yicha xabaringiz"),
+        (("muddat", "qachon", "tayyor", "kechik", "vaqt", "sana"), "Buyurtma muddati bo‘yicha savolingiz"),
+        (("o'zgart", "o‘zgart", "almashtir", "qo'sh", "qo‘sh"), "Buyurtmaga o‘zgartirish kiritish bo‘yicha xabaringiz"),
+        (("shikoyat", "norozi", "muammo", "xato", "kamchilik"), "Muhim murojaatingiz"),
+    ]
+    for keywords, label in keyword_groups:
+        if any(keyword in text for keyword in keywords):
+            reply_topic = label
+            break
+
+    clean_name = " ".join(str(customer_name or "").split())
+    greeting = f"Assalomu alaykum, hurmatli {clean_name}!" if clean_name else "Assalomu alaykum, hurmatli mijoz!"
+    return (
+        f"{greeting}\n\n"
+        f"{reply_topic}ni qabul qildim. Ma’lumotlaringizni menejerga yetkazdim. "
+        "Menejerimiz masalani ko‘rib chiqib, sizga tez orada shu chat orqali javob yozadi.\n\n"
+        "Murojaatingiz e’tiborsiz qolmaydi."
+    )
+
+
+def serialize_message(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "ticket_id": row["ticket_id"],
+        "sender_role": row["sender_role"],
+        "sender_name": row["sender_name"],
+        "body": row["body"],
+        "attachment_name": row["attachment_name"],
+        "attachment_url": f"/uploads/{row['attachment_path']}" if row["attachment_path"] else None,
+        "created_at": row["created_at"],
+        "created_text": pretty_date_time(row["created_at"]),
+    }
+
+
+def pretty_date_time(value: str) -> str:
+    try:
+        return datetime.fromisoformat(value).strftime("%d.%m.%Y • %H:%M")
+    except (TypeError, ValueError):
+        return value or "—"
+
+
+def serialize_ticket(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "order_id": row["order_id"],
+        "order_code": row["order_code"],
+        "customer_name": row["customer_name"],
+        "customer_phone": row["customer_phone"],
+        "topic": row["topic"],
+        "subject": row["subject"],
+        "status": row["status"],
+        "priority": row["priority"],
+        "assigned_role": row["assigned_role"],
+        "escalated_to_admin": bool(row["escalated_to_admin"]),
+        "customer_unread": bool(row["customer_unread"]),
+        "manager_unread": bool(row["manager_unread"]),
+        "admin_unread": bool(row["admin_unread"]),
+        "last_message_at": row["last_message_at"],
+        "last_message_text": pretty_date_time(row["last_message_at"]),
+        "created_at": row["created_at"],
+        "created_text": pretty_date_time(row["created_at"]),
+        "last_body": row["last_body"] or "",
+        "message_count": row["message_count"],
+    }
+
+
+def get_ticket_rows(db: sqlite3.Connection, where: str = "", params: tuple = ()) -> list[sqlite3.Row]:
+    query = f"""
+        SELECT t.*, o.order_code,
+               cu.full_name AS customer_name, cu.phone AS customer_phone,
+               (SELECT body FROM support_messages sm WHERE sm.ticket_id=t.id AND sm.sender_role='customer' ORDER BY sm.id DESC LIMIT 1) AS last_body,
+               (SELECT COUNT(*) FROM support_messages sm WHERE sm.ticket_id=t.id) AS message_count
+        FROM support_tickets t
+        JOIN orders o ON o.id=t.order_id
+        JOIN customers cu ON cu.id=t.customer_id
+        {where}
+        ORDER BY t.escalated_to_admin DESC, t.last_message_at DESC
+    """
+    return db.execute(query, params).fetchall()
+
+
+def require_staff() -> str | None:
+    role = session.get("role")
+    return role if role in {"manager", "admin"} else None
+
+
+def apply_overdue_escalations(db: sqlite3.Connection) -> int:
+    """Menejer 1 soat ichida javob bermagan murojaatni rahbar nazoratiga chiqaradi."""
+    cutoff = (now_tashkent() - timedelta(hours=1)).isoformat(timespec="seconds")
+    overdue = db.execute(
+        """SELECT id FROM support_tickets
+           WHERE escalated_to_admin=0
+             AND status IN ('Yangi', 'Mijoz javob berdi')
+             AND last_message_at <= ?""",
+        (cutoff,),
+    ).fetchall()
+    if not overdue:
+        return 0
+    escalated_at = now_tashkent().isoformat(timespec="seconds")
+    for row in overdue:
+        db.execute(
+            """UPDATE support_tickets SET escalated_to_admin=1, assigned_role='admin',
+               priority='Muhim', status='Rahbarga yuborildi', admin_unread=1,
+               last_message_at=? WHERE id=?""",
+            (escalated_at, row["id"]),
+        )
+        db.execute(
+            """INSERT INTO support_messages
+               (ticket_id, sender_role, sender_name, body, created_at)
+               VALUES (?, 'system', 'Mebel360°',
+               'Menejer 1 soat ichida javob bermagani uchun murojaat avtomatik ravishda rahbar nazoratiga yuborildi.', ?)""",
+            (row["id"], escalated_at),
+        )
+    return len(overdue)
+
+
 @app.before_request
 def ensure_database() -> None:
     init_db()
@@ -320,12 +522,13 @@ def select_role():
         return jsonify(ok=False, message="Rol noto‘g‘ri tanlandi."), 400
 
     session["role"] = role
-    return jsonify(
-        ok=True,
-        role=role,
-        next_screen="contractScreen" if role == "customer" else None,
-        message="Rol tanlandi.",
-    )
+    next_screen = None
+    if role == "customer":
+        next_screen = "contractScreen"
+    elif role in {"manager", "admin"}:
+        next_screen = "staffSupportScreen"
+
+    return jsonify(ok=True, role=role, next_screen=next_screen, message="Rol tanlandi.")
 
 
 @app.get("/api/customer/contract")
@@ -383,9 +586,274 @@ def confirm_customer_contract():
     )
 
 
+@app.get("/uploads/<path:filename>")
+def uploaded_file(filename: str):
+    return send_from_directory(UPLOAD_DIR, filename, as_attachment=False)
+
+
+@app.get("/api/customer/support")
+def customer_support():
+    contract = current_customer_context()
+    if contract is None:
+        return jsonify(ok=False, message="Mijoz buyurtmasi topilmadi."), 404
+    order_id = int(contract["order"]["id"])
+    customer_name = contract["customer"]["full_name"]
+    requested_ticket = request.args.get("ticket_id", type=int)
+
+    with get_db() as db:
+        apply_overdue_escalations(db)
+        rows = get_ticket_rows(db, "WHERE t.order_id = ?", (order_id,))
+        ticket_id = requested_ticket or (rows[0]["id"] if rows else None)
+        active = next((row for row in rows if row["id"] == ticket_id), None)
+        messages = []
+        if active is not None:
+            db.execute("UPDATE support_tickets SET customer_unread=0 WHERE id=?", (active["id"],))
+            rows = get_ticket_rows(db, "WHERE t.order_id = ?", (order_id,))
+            active = next((row for row in rows if row["id"] == ticket_id), None)
+            message_rows = db.execute(
+                "SELECT * FROM support_messages WHERE ticket_id=? ORDER BY id", (ticket_id,)
+            ).fetchall()
+            messages = [serialize_message(row) for row in message_rows]
+
+    return jsonify(
+        ok=True,
+        data={
+            "customer_name": customer_name,
+            "order": {
+                "id": order_id,
+                "code": contract["order"]["code"],
+                "product_name": contract["order"]["product_name"],
+                "status": contract["order"]["status"],
+            },
+            "tickets": [serialize_ticket(row) for row in rows],
+            "active_ticket": serialize_ticket(active) if active else None,
+            "messages": messages,
+        },
+    )
+
+
+@app.post("/api/customer/support/messages")
+def customer_support_message():
+    contract = current_customer_context()
+    if contract is None:
+        return jsonify(ok=False, message="Mijoz buyurtmasi topilmadi."), 404
+
+    payload = request.form if request.form else (request.get_json(silent=True) or {})
+    body = str(payload.get("body", "")).strip()
+    topic = str(payload.get("topic", "Buyurtma jarayoni")).strip() or "Buyurtma jarayoni"
+    subject = str(payload.get("subject", "")).strip() or topic
+    ticket_id = payload.get("ticket_id")
+    try:
+        ticket_id = int(ticket_id) if ticket_id else None
+    except (TypeError, ValueError):
+        ticket_id = None
+
+    try:
+        attachment_name, attachment_path = save_attachment(request.files.get("attachment"))
+    except ValueError as exc:
+        return jsonify(ok=False, message=str(exc)), 400
+    if not body and not attachment_path:
+        return jsonify(ok=False, message="Xabar matnini yozing yoki fayl biriktiring."), 400
+
+    order_id = int(contract["order"]["id"])
+    customer_id = None
+    created_at = now_tashkent().isoformat(timespec="seconds")
+    with get_db() as db:
+        customer_row = db.execute("SELECT customer_id FROM orders WHERE id=?", (order_id,)).fetchone()
+        customer_id = customer_row["customer_id"]
+        if ticket_id:
+            ticket = db.execute(
+                "SELECT id, escalated_to_admin FROM support_tickets WHERE id=? AND order_id=?",
+                (ticket_id, order_id),
+            ).fetchone()
+            if ticket is None:
+                return jsonify(ok=False, message="Murojaat topilmadi."), 404
+            admin_unread = 1 if ticket["escalated_to_admin"] else 0
+            db.execute(
+                """UPDATE support_tickets
+                   SET status='Mijoz javob berdi', manager_unread=1, admin_unread=?,
+                       customer_unread=0, last_message_at=?, closed_at=NULL
+                   WHERE id=?""",
+                (admin_unread, created_at, ticket_id),
+            )
+        else:
+            priority = "Muhim" if topic in {"Shikoyat yoki taklif", "To‘lov masalasi"} else "Oddiy"
+            admin_unread = 1 if topic == "Shikoyat yoki taklif" else 0
+            cursor = db.execute(
+                """INSERT INTO support_tickets
+                   (order_id, customer_id, topic, subject, status, priority,
+                    assigned_role, escalated_to_admin, manager_unread, admin_unread,
+                    last_message_at, created_at)
+                   VALUES (?, ?, ?, ?, 'Yangi', ?, 'manager', 0, 1, ?, ?, ?)""",
+                (order_id, customer_id, topic, subject, priority, admin_unread, created_at, created_at),
+            )
+            ticket_id = cursor.lastrowid
+
+        cursor = db.execute(
+            """INSERT INTO support_messages
+               (ticket_id, sender_role, sender_name, body, attachment_name, attachment_path, created_at)
+               VALUES (?, 'customer', ?, ?, ?, ?, ?)""",
+            (ticket_id, contract["customer"]["full_name"], body, attachment_name, attachment_path, created_at),
+        )
+        message_id = cursor.lastrowid
+        message = db.execute("SELECT * FROM support_messages WHERE id=?", (message_id,)).fetchone()
+
+        ai_created_at = (datetime.fromisoformat(created_at) + timedelta(seconds=1)).isoformat(timespec="seconds")
+        ai_body = build_ai_acknowledgement(contract["customer"]["full_name"], topic, body)
+        ai_cursor = db.execute(
+            """INSERT INTO support_messages
+               (ticket_id, sender_role, sender_name, body, created_at)
+               VALUES (?, 'ai', 'Mebel360 AI', ?, ?)""",
+            (ticket_id, ai_body, ai_created_at),
+        )
+        ai_message = db.execute(
+            "SELECT * FROM support_messages WHERE id=?", (ai_cursor.lastrowid,)
+        ).fetchone()
+        db.execute(
+            "UPDATE support_tickets SET last_message_at=? WHERE id=?",
+            (ai_created_at, ticket_id),
+        )
+
+    return jsonify(
+        ok=True,
+        message="Mebel360 AI xabaringizni qabul qildi va menejerga yetkazdi.",
+        ticket_id=ticket_id,
+        data=serialize_message(message),
+        ai_data=serialize_message(ai_message),
+    )
+
+
+@app.post("/api/customer/support/<int:ticket_id>/escalate")
+def customer_support_escalate(ticket_id: int):
+    contract = current_customer_context()
+    if contract is None:
+        return jsonify(ok=False, message="Mijoz buyurtmasi topilmadi."), 404
+    order_id = int(contract["order"]["id"])
+    created_at = now_tashkent().isoformat(timespec="seconds")
+    with get_db() as db:
+        ticket = db.execute("SELECT id, escalated_to_admin FROM support_tickets WHERE id=? AND order_id=?", (ticket_id, order_id)).fetchone()
+        if ticket is None:
+            return jsonify(ok=False, message="Murojaat topilmadi."), 404
+        if ticket["escalated_to_admin"]:
+            return jsonify(ok=True, message="Murojaat allaqachon rahbarga yuborilgan.")
+        db.execute(
+            """UPDATE support_tickets SET escalated_to_admin=1, assigned_role='admin',
+               priority='Muhim', status='Rahbarga yuborildi', admin_unread=1,
+               last_message_at=? WHERE id=?""",
+            (created_at, ticket_id),
+        )
+        db.execute(
+            """INSERT INTO support_messages
+               (ticket_id, sender_role, sender_name, body, created_at)
+               VALUES (?, 'system', 'Mebel360°', 'Mijoz murojaatni rahbar ko‘rib chiqishini so‘radi.', ?)""",
+            (ticket_id, created_at),
+        )
+    return jsonify(ok=True, message="Murojaat rahbar kabinetiga yuborildi.")
+
+
+@app.get("/api/staff/support/inbox")
+def staff_support_inbox():
+    role = require_staff()
+    if role is None:
+        return jsonify(ok=False, message="Bu bo‘limga kirish huquqi mavjud emas."), 403
+    requested_ticket = request.args.get("ticket_id", type=int)
+    with get_db() as db:
+        apply_overdue_escalations(db)
+        rows = get_ticket_rows(db)
+        ticket_id = requested_ticket or (rows[0]["id"] if rows else None)
+        active = next((row for row in rows if row["id"] == ticket_id), None)
+        messages = []
+        if active is not None:
+            unread_column = "admin_unread" if role == "admin" else "manager_unread"
+            db.execute(f"UPDATE support_tickets SET {unread_column}=0 WHERE id=?", (active["id"],))
+            rows = get_ticket_rows(db)
+            active = next((row for row in rows if row["id"] == ticket_id), None)
+            message_rows = db.execute("SELECT * FROM support_messages WHERE ticket_id=? ORDER BY id", (ticket_id,)).fetchall()
+            messages = [serialize_message(row) for row in message_rows]
+
+        counts = {
+            "all": len(rows),
+            "new": sum(1 for row in rows if row["status"] in {"Yangi", "Mijoz javob berdi", "Rahbarga yuborildi"}),
+            "open": sum(1 for row in rows if row["status"] not in {"Yopildi", "Hal qilindi"}),
+            "escalated": sum(1 for row in rows if row["escalated_to_admin"]),
+            "unread": sum(1 for row in rows if row["admin_unread" if role == "admin" else "manager_unread"]),
+        }
+    return jsonify(ok=True, data={"role": role, "counts": counts, "tickets": [serialize_ticket(row) for row in rows], "active_ticket": serialize_ticket(active) if active else None, "messages": messages})
+
+
+@app.post("/api/staff/support/<int:ticket_id>/messages")
+def staff_support_message(ticket_id: int):
+    role = require_staff()
+    if role is None:
+        return jsonify(ok=False, message="Bu bo‘limga kirish huquqi mavjud emas."), 403
+    payload = request.form if request.form else (request.get_json(silent=True) or {})
+    body = str(payload.get("body", "")).strip()
+    try:
+        attachment_name, attachment_path = save_attachment(request.files.get("attachment"))
+    except ValueError as exc:
+        return jsonify(ok=False, message=str(exc)), 400
+    if not body and not attachment_path:
+        return jsonify(ok=False, message="Javob matnini yozing yoki fayl biriktiring."), 400
+    created_at = now_tashkent().isoformat(timespec="seconds")
+    sender_name = "Rahbar" if role == "admin" else "Menejer"
+    with get_db() as db:
+        ticket = db.execute("SELECT id FROM support_tickets WHERE id=?", (ticket_id,)).fetchone()
+        if ticket is None:
+            return jsonify(ok=False, message="Murojaat topilmadi."), 404
+        db.execute(
+            """UPDATE support_tickets SET status='Javob berildi', customer_unread=1,
+               manager_unread=0, admin_unread=0, last_message_at=?, closed_at=NULL WHERE id=?""",
+            (created_at, ticket_id),
+        )
+        cursor = db.execute(
+            """INSERT INTO support_messages
+               (ticket_id, sender_role, sender_name, body, attachment_name, attachment_path, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (ticket_id, role, sender_name, body, attachment_name, attachment_path, created_at),
+        )
+        row = db.execute("SELECT * FROM support_messages WHERE id=?", (cursor.lastrowid,)).fetchone()
+    return jsonify(ok=True, message="Javob mijozga yuborildi.", data=serialize_message(row))
+
+
+@app.post("/api/staff/support/<int:ticket_id>/status")
+def staff_support_status(ticket_id: int):
+    role = require_staff()
+    if role is None:
+        return jsonify(ok=False, message="Bu bo‘limga kirish huquqi mavjud emas."), 403
+    data = request.get_json(silent=True) or {}
+    status = str(data.get("status", "")).strip()
+    allowed = {"Yangi", "Ko‘rib chiqilmoqda", "Javob berildi", "Hal qilindi", "Yopildi", "Rahbarga yuborildi"}
+    if status not in allowed:
+        return jsonify(ok=False, message="Holat noto‘g‘ri tanlandi."), 400
+    closed_at = now_tashkent().isoformat(timespec="seconds") if status in {"Hal qilindi", "Yopildi"} else None
+    with get_db() as db:
+        result = db.execute("UPDATE support_tickets SET status=?, closed_at=? WHERE id=?", (status, closed_at, ticket_id))
+        if result.rowcount == 0:
+            return jsonify(ok=False, message="Murojaat topilmadi."), 404
+    return jsonify(ok=True, message="Murojaat holati yangilandi.")
+
+
+@app.post("/api/staff/support/<int:ticket_id>/escalate")
+def staff_support_escalate(ticket_id: int):
+    role = require_staff()
+    if role is None:
+        return jsonify(ok=False, message="Bu bo‘limga kirish huquqi mavjud emas."), 403
+    created_at = now_tashkent().isoformat(timespec="seconds")
+    with get_db() as db:
+        result = db.execute(
+            """UPDATE support_tickets SET escalated_to_admin=1, assigned_role='admin',
+               priority='Muhim', status='Rahbarga yuborildi', admin_unread=1,
+               last_message_at=? WHERE id=?""",
+            (created_at, ticket_id),
+        )
+        if result.rowcount == 0:
+            return jsonify(ok=False, message="Murojaat topilmadi."), 404
+    return jsonify(ok=True, message="Murojaat rahbarga yuborildi.")
+
+
 @app.get("/health")
 def health():
-    return jsonify(status="ok", app="Mebel360", contract_module=True)
+    return jsonify(status="ok", app="Mebel360", contract_module=True, support_module=True)
 
 
 if __name__ == "__main__":

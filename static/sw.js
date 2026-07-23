@@ -1,4 +1,4 @@
-const CACHE = "mebel360-contract-v3";
+const CACHE = "mebel360-support-v5";
 const ASSETS = [
   "/",
   "/static/css/style.css",

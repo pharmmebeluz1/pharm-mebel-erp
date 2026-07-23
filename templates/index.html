@@ -197,6 +197,15 @@
           </div>
         </div>
 
+        <button class="support-shortcut no-print" id="openSupportBtn" type="button">
+          <span class="support-shortcut-icon">✦</span>
+          <span class="support-shortcut-copy">
+            <strong data-i18n="writeManager">Menejerga yozish</strong>
+            <small data-i18n="supportShortcutText">Buyurtma, chizma, to‘lov yoki o‘zgarish bo‘yicha xabar yuboring</small>
+          </span>
+          <span class="support-shortcut-arrow">→</span>
+        </button>
+
         <article class="contract-paper" id="contractPaper">
           <div class="contract-brand">
             <img src="{{ url_for('static', filename='img/icon-192.png') }}" alt="Mebel360°">
@@ -387,6 +396,177 @@
             </button>
           </div>
           <p class="contract-note" data-i18n="contractSavedNote">Tasdiq sanasi va vaqti tizimda saqlanadi.</p>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- 5. MIJOZ MUROJAATLARI -->
+    <section class="screen support-screen" id="supportScreen" aria-label="Mijoz murojaatlari">
+      <header class="screen-header support-header">
+        <button class="icon-button" type="button" data-back="contractScreen" aria-label="Orqaga">←</button>
+        <div class="support-header-title">
+          <strong data-i18n="supportCenter">Murojaatlar markazi</strong>
+          <small id="supportOrderCode">—</small>
+        </div>
+        <button class="icon-button theme-clone" type="button" aria-label="Rang mavzusini almashtirish">☀</button>
+      </header>
+
+      <div class="support-wrap">
+        <section class="support-hero">
+          <div>
+            <span class="eyebrow" data-i18n="directContact">To‘g‘ridan-to‘g‘ri aloqa</span>
+            <h2 data-i18n="managerHelp">Menejer sizga yordam beradi</h2>
+            <p data-i18n="supportSubtitle">Savolingiz buyurtma kodi bilan saqlanadi. Muhim masalani rahbarga yuborish mumkin.</p>
+          </div>
+          <span class="support-hero-icon">💬</span>
+        </section>
+
+        <section class="order-context-card">
+          <div class="order-context-icon">▣</div>
+          <div>
+            <span data-i18n="orderInfo">Buyurtma ma’lumoti</span>
+            <strong id="supportOrderName">—</strong>
+            <small id="supportOrderStatus">—</small>
+          </div>
+          <button class="tiny-action" id="newSupportRequestBtn" type="button" data-i18n="newRequest">Yangi murojaat</button>
+        </section>
+
+        <div class="ticket-strip" id="customerTicketList"></div>
+
+        <section class="conversation-card">
+          <div class="conversation-head">
+            <div>
+              <span class="eyebrow" id="customerConversationTopic" data-i18n="newRequest">Yangi murojaat</span>
+              <h3 id="customerConversationTitle" data-i18n="writeManager">Menejerga yozish</h3>
+            </div>
+            <span class="ticket-status" id="customerTicketStatus" hidden>Yangi</span>
+          </div>
+
+          <div class="message-list" id="customerMessageList">
+            <div class="empty-conversation">
+              <span>✉</span>
+              <strong data-i18n="noMessages">Hali xabar yo‘q</strong>
+              <p data-i18n="firstMessageHint">Mavzuni tanlang va birinchi xabaringizni yozing.</p>
+            </div>
+          </div>
+
+          <div class="ai-response-note">
+            <span class="ai-response-note-icon">✦</span>
+            <span>
+              <strong data-i18n="aiAssistant">Mebel360 AI yordamchi</strong>
+              <small data-i18n="aiAssistantHint">Xabaringizni darhol qabul qiladi va menejerga yetkazadi</small>
+            </span>
+          </div>
+
+          <form class="message-composer" id="customerMessageForm">
+            <div class="composer-topic" id="customerTopicFields">
+              <label>
+                <span data-i18n="topic">Mavzu</span>
+                <select id="customerSupportTopic" name="topic">
+                  <option value="Buyurtma jarayoni">Buyurtma jarayoni</option>
+                  <option value="Chizma yoki o‘lchov">Chizma yoki o‘lchov</option>
+                  <option value="To‘lov masalasi">To‘lov masalasi</option>
+                  <option value="O‘zgartirish kiritish">O‘zgartirish kiritish</option>
+                  <option value="Shikoyat yoki taklif">Shikoyat yoki taklif</option>
+                </select>
+              </label>
+              <label>
+                <span data-i18n="subject">Qisqa sarlavha</span>
+                <input id="customerSupportSubject" name="subject" maxlength="120" placeholder="Masalan: shkaf rangini o‘zgartirish">
+              </label>
+            </div>
+            <textarea id="customerMessageBody" name="body" rows="3" maxlength="2000" data-i18n-placeholder="messagePlaceholder" placeholder="Xabaringizni yozing..."></textarea>
+            <div class="composer-actions">
+              <label class="attachment-button" title="Fayl biriktirish">
+                <input id="customerAttachment" name="attachment" type="file" accept=".png,.jpg,.jpeg,.webp,.pdf,.doc,.docx,.xls,.xlsx">
+                <span>📎</span>
+                <small id="customerAttachmentName" data-i18n="attachFile">Fayl</small>
+              </label>
+              <button class="send-button" type="submit">
+                <span data-i18n="send">Yuborish</span><b>➤</b>
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <button class="escalate-button" id="customerEscalateBtn" type="button" disabled>
+          <span>⚑</span>
+          <span><strong data-i18n="sendToDirector">Rahbarga yuborish</strong><small data-i18n="escalateHint">Masala menejer orqali hal bo‘lmasa foydalaning</small></span>
+        </button>
+      </div>
+    </section>
+
+    <!-- 6. MENEJER VA RAHBAR MUROJAATLAR KABINETI -->
+    <section class="screen staff-support-screen" id="staffSupportScreen" aria-label="Murojaatlar kabineti">
+      <header class="screen-header staff-support-header">
+        <button class="icon-button" type="button" data-back="roleScreen" aria-label="Orqaga">←</button>
+        <div class="support-header-title">
+          <strong id="staffInboxTitle">Murojaatlar kabineti</strong>
+          <small id="staffRoleLabel">Menejer</small>
+        </div>
+        <button class="icon-button theme-clone" type="button" aria-label="Rang mavzusini almashtirish">☀</button>
+      </header>
+
+      <div class="staff-support-wrap">
+        <section class="staff-metrics">
+          <article><span>◉</span><div><small data-i18n="allRequests">Jami</small><strong id="metricAll">0</strong></div></article>
+          <article><span>●</span><div><small data-i18n="newRequests">Yangi</small><strong id="metricNew">0</strong></div></article>
+          <article><span>⚑</span><div><small data-i18n="importantRequests">Muhim</small><strong id="metricEscalated">0</strong></div></article>
+          <article><span>✉</span><div><small data-i18n="unreadRequests">O‘qilmagan</small><strong id="metricUnread">0</strong></div></article>
+        </section>
+
+        <div class="staff-support-grid">
+          <aside class="staff-ticket-panel">
+            <div class="panel-title-row">
+              <div><span class="eyebrow" data-i18n="customerRequests">Mijoz murojaatlari</span><h2 data-i18n="inbox">Kiruvchi xabarlar</h2></div>
+              <button class="round-refresh" id="refreshStaffInboxBtn" type="button" aria-label="Yangilash">↻</button>
+            </div>
+            <div class="filter-chips" id="staffFilterChips">
+              <button class="filter-chip active" type="button" data-filter="all" data-i18n="all">Barchasi</button>
+              <button class="filter-chip" type="button" data-filter="new" data-i18n="newRequests">Yangi</button>
+              <button class="filter-chip" type="button" data-filter="escalated" data-i18n="importantRequests">Muhim</button>
+              <button class="filter-chip" type="button" data-filter="closed" data-i18n="closed">Yopilgan</button>
+            </div>
+            <div class="staff-ticket-list" id="staffTicketList"></div>
+          </aside>
+
+          <section class="staff-conversation-panel" id="staffConversationPanel">
+            <div class="staff-empty-state" id="staffEmptyState">
+              <span>💬</span><strong data-i18n="selectRequest">Murojaatni tanlang</strong><p data-i18n="selectRequestHint">Mijoz yozishmasi shu yerda ochiladi.</p>
+            </div>
+            <div id="staffConversationContent" hidden>
+              <header class="staff-conversation-head">
+                <div>
+                  <span class="eyebrow" id="staffTicketOrder">—</span>
+                  <h2 id="staffTicketCustomer">—</h2>
+                  <p id="staffTicketTopic">—</p>
+                </div>
+                <span class="ticket-status" id="staffTicketStatus">—</span>
+              </header>
+
+              <div class="staff-ticket-tools">
+                <select id="staffStatusSelect" aria-label="Murojaat holati">
+                  <option>Yangi</option><option>Ko‘rib chiqilmoqda</option><option>Javob berildi</option><option>Hal qilindi</option><option>Yopildi</option>
+                </select>
+                <button id="saveStaffStatusBtn" type="button" data-i18n="saveStatus">Holatni saqlash</button>
+                <button class="staff-escalate" id="staffEscalateBtn" type="button">⚑ <span data-i18n="sendToDirector">Rahbarga yuborish</span></button>
+              </div>
+
+              <div class="message-list staff-message-list" id="staffMessageList"></div>
+
+              <form class="message-composer staff-composer" id="staffReplyForm">
+                <textarea id="staffReplyBody" name="body" rows="3" maxlength="2000" data-i18n-placeholder="replyPlaceholder" placeholder="Mijozga javob yozing..."></textarea>
+                <div class="composer-actions">
+                  <label class="attachment-button">
+                    <input id="staffAttachment" name="attachment" type="file" accept=".png,.jpg,.jpeg,.webp,.pdf,.doc,.docx,.xls,.xlsx">
+                    <span>📎</span><small id="staffAttachmentName" data-i18n="attachFile">Fayl</small>
+                  </label>
+                  <button class="send-button" type="submit"><span data-i18n="reply">Javob berish</span><b>➤</b></button>
+                </div>
+              </form>
+            </div>
+          </section>
         </div>
       </div>
     </section>
