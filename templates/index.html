@@ -2,578 +2,64 @@
 <html lang="uz">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0ea85b">
-  <meta name="description" content="Mebel360° mebel ishlab chiqarishni boshqarish tizimi">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0a3d78">
+  <meta name="description" content="Mebel360° — mebel korxonasini 360 darajada boshqarish platformasi">
   <title>Mebel360°</title>
-  <link rel="manifest" href="{{ url_for('static', filename='manifest.json', v='20260723-6') }}">
-  <link rel="icon" href="{{ url_for('static', filename='img/icon-192.png', v='20260723-6') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='20260723-6') }}">
+  <link rel="manifest" href="/manifest.webmanifest?v=1.0.0">
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='assets/favicon.png') }}?v=1.0.0">
+  <link rel="apple-touch-icon" href="{{ url_for('static', filename='assets/icon-192.png') }}?v=1.0.0">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}?v=1.0.0">
 </head>
 <body>
-  <main class="app-shell" aria-live="polite">
-    <div class="ambient ambient-one"></div>
-    <div class="ambient ambient-two"></div>
+  <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
+  <header class="topbar">
+    <div class="brand-mini">
+      <img src="{{ url_for('static', filename='assets/icon-192.png') }}" alt="Mebel360°">
+      <div><strong>Mebel360°</strong><span>Boshqaruv platformasi</span></div>
+    </div>
+    <button id="installBtn" class="install ghost" hidden>📲 Ilovani o‘rnatish</button>
+  </header>
 
-    <!-- 1. OCHILISH OYNASI -->
-    <section class="screen active" id="splashScreen" aria-label="Ochilish oynasi">
-      <div class="splash-content">
-        <div class="brand-block reveal delay-1">
-          <img class="brand-logo" src="{{ url_for('static', filename='img/mebel360-logo.jpg', v='20260723-6') }}" alt="Mebel360° logotipi">
-          <p class="brand-tagline" data-i18n="tagline">MEBEL ISHLAB CHIQARISH BOSHQARUV TIZIMI</p>
-        </div>
-
-        <div class="clock-block reveal delay-2">
-          <time id="liveClock" class="live-clock">--:--:--</time>
-          <div class="date-row">
-            <span class="mini-chip"><span class="chip-icon">▣</span><span id="weekdayText">—</span></span>
-            <span class="mini-chip"><span class="chip-icon">▣</span><span id="dateText">—</span></span>
-            <span class="mini-chip"><span class="chip-icon">⌖</span><span data-i18n="tashkent">Toshkent</span></span>
-          </div>
-        </div>
-
-        <div class="welcome-block reveal delay-3">
-          <h1><span class="green">Mebel360°</span> <span data-i18n="welcome">dasturiga xush kelibsiz!</span></h1>
-          <p data-i18n="opening">Dastur ochilmoqda...</p>
-          <div class="progress-row">
-            <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
-            <strong id="progressText">0%</strong>
-          </div>
-        </div>
-
-        <button class="primary-button reveal delay-4" id="openLoginBtn" type="button">
-          <span data-i18n="enter">Kirish</span>
-          <span class="button-arrow">→</span>
-        </button>
+  <main>
+    <section class="hero">
+      <div class="logo-card">
+        <img class="main-logo" src="{{ url_for('static', filename='assets/mebel360-logo.png') }}" alt="Mebel360° logosi">
       </div>
-
-      <div class="wave-scene" aria-hidden="true">
-        <span class="wave wave-a"></span>
-        <span class="wave wave-b"></span>
-        <span class="wave wave-c"></span>
-      </div>
-
-      <div class="language-bar reveal delay-5" data-language-bar></div>
-    </section>
-
-    <!-- 2. KIRISH OYNASI -->
-    <section class="screen" id="loginScreen" aria-label="Kirish oynasi">
-      <header class="screen-header">
-        <button class="icon-button" type="button" data-back="splashScreen" aria-label="Orqaga">←</button>
-        <button class="icon-button" id="themeToggle" type="button" aria-label="Rang mavzusini almashtirish">☀</button>
-      </header>
-
-      <div class="login-content">
-        <div class="section-title">
-          <h2 data-i18n="loginTitle">Kirish</h2>
-          <p data-i18n="loginSubtitle">Hisobingizga kiring</p>
+      <div class="hero-copy">
+        <span class="eyebrow">MEBEL ISHLAB CHIQARISH UCHUN</span>
+        <h1>Korxonangizni <em>360°</em> nazorat qiling</h1>
+        <p>Buyurtma, konstruktor, ishlab chiqarish, ombor, moliya va mijoz jarayonlarini bitta qulay platformada boshqarish uchun tayyor mobil qobiq.</p>
+        <div class="actions">
+          <button id="installBtnHero" class="install primary" hidden>Telefonga o‘rnatish</button>
+          <a href="#modules" class="secondary">Bo‘limlarni ko‘rish</a>
         </div>
-
-        <img class="login-logo" src="{{ url_for('static', filename='img/mebel360-logo.jpg', v='20260723-6') }}" alt="Mebel360°">
-
-        <form id="loginForm" novalidate>
-          <label class="field">
-            <span class="field-icon" aria-hidden="true">♙</span>
-            <input id="username" name="username" autocomplete="username" data-i18n-placeholder="username" placeholder="Foydalanuvchi nomi">
-          </label>
-
-          <label class="field">
-            <span class="field-icon" aria-hidden="true">▣</span>
-            <input id="password" name="password" type="password" autocomplete="current-password" data-i18n-placeholder="password" placeholder="Parol">
-            <button class="password-toggle" id="passwordToggle" type="button" aria-label="Parolni ko‘rsatish">◉</button>
-          </label>
-
-          <label class="remember-row">
-            <input id="rememberMe" type="checkbox">
-            <span data-i18n="remember">Meni eslab qol</span>
-          </label>
-
-          <button class="primary-button login-button" type="submit">
-            <span data-i18n="enter">Kirish</span>
-            <span class="button-arrow">→</span>
-          </button>
-        </form>
-
-        <div class="divider"><span data-i18n="or">yoki</span></div>
-
-        <button class="secondary-button" id="smsBtn" type="button">
-          <span class="sms-icon">▣</span>
-          <span data-i18n="smsLogin">SMS orqali kirish</span>
-        </button>
-      </div>
-
-      <div class="login-wave" aria-hidden="true"></div>
-      <div class="language-bar" data-language-bar></div>
-    </section>
-
-    <!-- 3. ROL TANLASH -->
-    <section class="screen" id="roleScreen" aria-label="Rol tanlash oynasi">
-      <header class="screen-header">
-        <button class="icon-button" type="button" data-back="loginScreen" aria-label="Orqaga">←</button>
-        <button class="icon-button theme-clone" type="button" aria-label="Rang mavzusini almashtirish">☀</button>
-      </header>
-
-      <div class="role-content">
-        <div class="section-title role-title">
-          <h2 data-i18n="chooseRole">Rolni tanlang</h2>
-          <p data-i18n="chooseRoleSub">Iltimos, o‘zingizning rolingizni tanlang</p>
-        </div>
-
-        <div class="role-grid">
-          <button class="role-card featured" type="button" data-role="admin">
-            <span class="role-badge">★</span>
-            <span class="role-icon admin-icon">♟</span>
-            <strong data-i18n="admin">Admin</strong>
-            <small data-i18n="management">Boshqaruv</small>
-          </button>
-
-          <button class="role-card" type="button" data-role="worker">
-            <span class="role-icon worker-icon">●</span>
-            <strong data-i18n="worker">Ishchi</strong>
-            <small data-i18n="workshopEmployee">Korxona xodimi</small>
-          </button>
-
-          <button class="role-card" type="button" data-role="driver">
-            <span class="role-icon driver-icon">▰</span>
-            <strong data-i18n="driver">Shofyor</strong>
-            <small data-i18n="delivery">Yetkazib berish</small>
-          </button>
-
-          <button class="role-card" type="button" data-role="manager">
-            <span class="role-icon manager-icon">♟</span>
-            <strong data-i18n="manager">Menejer</strong>
-            <small data-i18n="clients">Mijozlar bilan ish</small>
-          </button>
-
-          <button class="role-card" type="button" data-role="constructor">
-            <span class="role-icon constructor-icon">△</span>
-            <strong data-i18n="constructor">Konstruktor</strong>
-            <small data-i18n="designing">Loyihalash</small>
-          </button>
-
-          <button class="role-card customer-card" type="button" data-role="customer">
-            <span class="role-badge contract-badge">§</span>
-            <span class="role-icon customer-icon">♙</span>
-            <strong data-i18n="customer">Mijoz</strong>
-            <small data-i18n="myContract">Mening shartnomam</small>
-          </button>
-        </div>
-      </div>
-
-      <div class="role-decor" aria-hidden="true"></div>
-      <div class="language-bar" data-language-bar></div>
-    </section>
-
-
-    <!-- 4. MIJOZNING AVTOMATIK SHARTNOMASI -->
-    <section class="screen contract-screen" id="contractScreen" aria-label="Mijoz shartnomasi">
-      <header class="screen-header contract-header no-print">
-        <button class="icon-button" type="button" data-back="roleScreen" aria-label="Orqaga">←</button>
-        <div class="contract-header-title">
-          <strong data-i18n="fullContract">To‘liq shartnoma</strong>
-          <small id="contractHeaderNumber">—</small>
-        </div>
-        <button class="icon-button theme-clone" type="button" aria-label="Rang mavzusini almashtirish">☀</button>
-      </header>
-
-      <div id="contractLoading" class="contract-loading">
-        <span class="loading-spinner"></span>
-        <strong data-i18n="loadingContract">Shartnoma ochilmoqda...</strong>
-      </div>
-
-      <div id="contractContent" class="contract-content" hidden>
-        <div class="contract-summary no-print">
-          <div>
-            <span data-i18n="contractNumber">Shartnoma raqami</span>
-            <strong id="summaryContractNumber">—</strong>
-          </div>
-          <div>
-            <span data-i18n="orderCode">Buyurtma kodi</span>
-            <strong id="summaryOrderCode">—</strong>
-          </div>
-          <div class="summary-wide">
-            <span data-i18n="contractStatus">Holati</span>
-            <strong id="summaryContractStatus" class="status-pill">—</strong>
-          </div>
-        </div>
-
-        <button class="support-shortcut no-print" id="openSupportBtn" type="button">
-          <span class="support-shortcut-icon">✦</span>
-          <span class="support-shortcut-copy">
-            <strong data-i18n="writeManager">Menejerga yozish</strong>
-            <small data-i18n="supportShortcutText">Buyurtma, chizma, to‘lov yoki o‘zgarish bo‘yicha xabar yuboring</small>
-          </span>
-          <span class="support-shortcut-arrow">→</span>
-        </button>
-
-        <article class="contract-paper" id="contractPaper">
-          <div class="contract-brand">
-            <img src="{{ url_for('static', filename='img/icon-192.png', v='20260723-6') }}" alt="Mebel360°">
-            <div>
-              <strong>Mebel360°</strong>
-              <span>Mebel ishlab chiqarish boshqaruv tizimi</span>
-            </div>
-          </div>
-
-          <header class="legal-title">
-            <p>MEBEL BUYUMLARINI TAYYORLASH, YETKAZIB BERISH VA O‘RNATISH TO‘G‘RISIDA</p>
-            <h1>SHARTNOMA</h1>
-            <div class="legal-meta">
-              <strong>№ <span data-contract="contract.number">—</span></strong>
-              <span>Toshkent shahri</span>
-              <span><span data-contract="contract.generated_date">—</span>-yil</span>
-            </div>
-          </header>
-
-          <p class="legal-intro">
-            Bir tomondan <strong data-contract="seller.name">—</strong>, nomidan
-            <strong data-contract="seller.representative">—</strong> (keyingi o‘rinlarda — “Bajaruvchi”),
-            ikkinchi tomondan fuqaro <strong data-contract="customer.full_name">—</strong>,
-            pasport/ID: <strong data-contract="customer.passport_id">—</strong> (keyingi o‘rinlarda — “Buyurtmachi”),
-            birgalikda “Taraflar” deb atalib, quyidagilar haqida ushbu shartnomani tuzdilar.
-          </p>
-
-          <section class="legal-section">
-            <h2>1. SHARTNOMA PREDMETI</h2>
-            <p>1.1. Bajaruvchi Buyurtmachining tasdiqlangan o‘lchovi, chizmasi, detalirovkasi, rang va material tanloviga muvofiq mebel buyumlarini tayyorlash, yetkazib berish va kelishilgan bo‘lsa o‘rnatish majburiyatini oladi. Buyurtmachi esa tayyor mahsulotni qabul qilish va ushbu shartnomada belgilangan tartibda haq to‘lash majburiyatini oladi.</p>
-            <p>1.2. Buyurtma kodi: <strong data-contract="order.code">—</strong>. Mahsulot nomi: <strong data-contract="order.product_name">—</strong>.</p>
-            <p>1.3. Buyurtmaning tarkibi va asosiy tavsifi ushbu shartnomaning ajralmas qismi hisoblanadi.</p>
-          </section>
-
-          <section class="legal-section">
-            <h2>2. BUYURTMA TARKIBI VA TEXNIK TAVSIFI</h2>
-            <div class="legal-table-wrap">
-              <table class="legal-table">
-                <thead><tr><th>Ko‘rsatkich</th><th>Ma’lumot</th></tr></thead>
-                <tbody>
-                  <tr><td>Mahsulot</td><td data-contract="order.product_name">—</td></tr>
-                  <tr><td>Tarkibi</td><td data-contract="order.specification">—</td></tr>
-                  <tr><td>Material</td><td data-contract="order.material">—</td></tr>
-                  <tr><td>Rang</td><td data-contract="order.color">—</td></tr>
-                  <tr><td>Miqdori</td><td><span data-contract="order.quantity">—</span> to‘plam/dona</td></tr>
-                  <tr><td>Yetkazish manzili</td><td data-contract="order.delivery_address">—</td></tr>
-                  <tr><td>Mo‘ljal</td><td data-contract="order.landmark">—</td></tr>
-                  <tr><td>Qavat / lift</td><td><span data-contract="order.floor">—</span> / <span data-contract="order.lift">—</span></td></tr>
-                  <tr><td>Katta mashina kirishi</td><td data-contract="order.truck_access">—</td></tr>
-                  <tr><td>Yetkazish va montaj</td><td data-contract="order.installation">—</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <p>2.1. Yakuniy o‘lchamlar, detallar soni, aksessuarlar, furnitura, oyna, yoritish, tutqich va boshqa elementlar Buyurtmachi tasdiqlagan chizma, hisob-kitob yoki ilovalarda ko‘rsatiladi.</p>
-            <p>2.2. Material rangining monitor yoki telefon ekranidagi ko‘rinishi haqiqiy namunadan biroz farq qilishi mumkin. Asosiy tanlov fizik namuna yoki taraflar tasdiqlagan katalog bo‘yicha amalga oshiriladi.</p>
-          </section>
-
-          <section class="legal-section">
-            <h2>3. SHARTNOMA NARXI VA TO‘LOV TARTIBI</h2>
-            <div class="payment-grid">
-              <div><span>Umumiy summa</span><strong data-contract="payment.total_text">—</strong></div>
-              <div><span>Avans</span><strong data-contract="payment.advance_text">—</strong></div>
-              <div><span>Oraliq to‘lov</span><strong data-contract="payment.interim_text">—</strong></div>
-              <div><span>Qoldiq</span><strong data-contract="payment.balance_text">—</strong></div>
-            </div>
-            <p>3.1. Shartnomaning umumiy qiymati <strong data-contract="payment.total_text">—</strong>ni tashkil etadi.</p>
-            <p>3.2. Buyurtmachi <strong data-contract="payment.advance_text">—</strong> miqdorida avans to‘laydi. Ishlab chiqarish muddati avans kelib tushgan, o‘lchovlar va dizayn tasdiqlangan kundan boshlab hisoblanadi.</p>
-            <p>3.3. Qolgan <strong data-contract="payment.balance_text">—</strong> mahsulot yetkazilishidan yoki montaj boshlanishidan oldin, taraflar kelishuviga asosan to‘lanadi.</p>
-            <p>3.4. To‘lov usuli: <strong data-contract="payment.method">—</strong>. Qo‘shimcha ishlar, materiallar yoki o‘zgarishlar alohida hisob-kitob qilinadi va Buyurtmachi tasdiqlaganidan keyin bajariladi.</p>
-          </section>
-
-          <section class="legal-section">
-            <h2>4. TAYYORLASH MUDDATI</h2>
-            <p>4.1. Ishning boshlanish sanasi: <strong data-contract="order.start_date">—</strong>. Rejalashtirilgan tugash sanasi: <strong data-contract="order.end_date">—</strong>.</p>
-            <p>4.2. Ushbu shartnoma hisobida bir hafta <strong>5,5 ish kuni</strong> deb olinadi. Dam olish va rasmiy bayram kunlari ishlab chiqarish muddatiga kiritilmaydi, agar taraflar yozma ravishda boshqacha kelishmagan bo‘lsa.</p>
-            <p>4.3. Buyurtmachi chizma, material yoki rangni kech tasdiqlasa, to‘lovni kechiktirsa, obyekt tayyor bo‘lmasa yoki Buyurtmachiga bog‘liq boshqa to‘siq yuzaga kelsa, bajarish muddati shuncha vaqtga uzayadi.</p>
-            <p>4.4. Material yetkazib beruvchidagi uzilish, elektr energiyasi, transport, uskunaning favqulodda nosozligi yoki Bajaruvchiga bog‘liq bo‘lmagan holatlarda yangi muddat Buyurtmachiga xabar qilinadi.</p>
-          </section>
-
-          <section class="legal-section">
-            <h2>5. BUYURTMACHINING HUQUQ VA MAJBURIYATLARI</h2>
-            <p>5.1. O‘lchov olish uchun obyektga erkin kirishni ta’minlash, devor, pol, shift, elektr, suv va boshqa kommunikatsiyalar haqidagi zarur ma’lumotlarni oldindan berish.</p>
-            <p>5.2. Chizma, rang, material, furnitura, narx va muddatni belgilangan vaqtda tasdiqlash hamda to‘lovlarni o‘z vaqtida amalga oshirish.</p>
-            <p>5.3. Tayyor mahsulotni kelishilgan vaqtda qabul qilish. Qabul qilish vaqtida aniqlangan kamchiliklar dalolatnoma yoki dasturdagi izoh orqali qayd etiladi.</p>
-            <p>5.4. Buyurtmachi tasdiqlagan chizma yoki material keyinchalik o‘zgartirilsa, qayta ishlash, demontaj, yangi material va qo‘shimcha muddat xarajatlari Buyurtmachi tomonidan qoplanadi.</p>
-          </section>
-
-          <section class="legal-section">
-            <h2>6. BAJARUVCHINING HUQUQ VA MAJBURIYATLARI</h2>
-            <p>6.1. Buyurtmani tasdiqlangan chizma, o‘lchov va materiallar asosida sifatli tayyorlash.</p>
-            <p>6.2. Buyurtmaning asosiy bosqichlari, tayyorlik holati va muhim o‘zgarishlari haqida Mebel360° mijoz kabineti yoki kelishilgan aloqa vositasi orqali xabar berish.</p>
-            <p>6.3. Buyurtmachi to‘lovni yoki tasdiqlashni kechiktirgan taqdirda ishni vaqtincha to‘xtatish va bajarish muddatini qayta hisoblash.</p>
-            <p>6.4. Texnik jihatdan xavfli yoki mahsulot sifatiga zarar yetkazadigan talabni bajarishni rad etish va maqbul yechim taklif qilish.</p>
-          </section>
-
-          <section class="legal-section">
-            <h2>7. YETKAZIB BERISH, O‘RNATISH VA QABUL QILISH</h2>
-            <p>7.1. Yetkazib berish va montaj manzili: <strong data-contract="order.delivery_address">—</strong>.</p>
-            <p>7.2. Buyurtmachi montaj joyini bo‘shatadi, elektr ta’minoti va xavfsiz ish sharoitini ta’minlaydi. Qurilish ishlari yakunlanmagan, devor yoki pol qiyshiq, namlik yuqori yoki kommunikatsiyalar yashirilgan bo‘lsa, kelib chiqadigan qo‘shimcha ishlar alohida hisoblanadi.</p>
-            <p>7.3. Mahsulot topshirilganda taraflar uning soni, tashqi ko‘rinishi va ishlashini tekshiradi. Buyurtmachining dastur orqali “Qabul qildim” yoki “Shartnomani tasdiqlayman” tugmasini bosishi elektron qayd sifatida tizimda sana-vaqti bilan saqlanadi.</p>
-            <p>7.4. Mahsulot tayyorligi haqida xabar berilgandan keyin Buyurtmachi qabul qilishni kechiktirsa, saqlash, qayta tashish va qo‘shimcha chiqimlar alohida hisoblanishi mumkin.</p>
-          </section>
-
-          <section class="legal-section">
-            <h2>8. SIFAT VA KAFOLAT</h2>
-            <p>8.1. Mahsulot uchun qabul qilingan kundan boshlab <strong><span data-contract="order.warranty_months">—</span> oy</strong> kafolat beriladi.</p>
-            <p>8.2. Kafolat Bajaruvchining ishlab chiqarish yoki montajdagi aybi bilan yuzaga kelgan nuqsonlarga tatbiq etiladi.</p>
-            <p>8.3. Noto‘g‘ri foydalanish, ortiqcha yuk, suv yoki namlik, yuqori harorat, mexanik zarba, boshqa usta tomonidan o‘zgartirish, tabiiy eskirish, elektr qurilmalaridagi tashqi nosozlik va Buyurtmachi aybi bilan kelib chiqqan holatlar kafolatga kirmaydi.</p>
-            <p>8.4. Tabiiy yog‘och, MDF, laminat, bo‘yoq va boshqa materiallarda tekstura yoki rangning kichik farqlari ishlab chiqarish nuqsoni hisoblanmaydi.</p>
-          </section>
-
-          <section class="legal-section">
-            <h2>9. O‘ZGARTIRISH VA QO‘SHIMCHA ISHLAR</h2>
-            <p>9.1. Shartnoma tasdiqlangandan keyingi o‘zgarishlar faqat taraflarning yozma yoki Mebel360° tizimidagi tasdig‘i asosida amalga oshiriladi.</p>
-            <p>9.2. Har bir o‘zgarish narx, material sarfi va muddatga ta’sir qilishi mumkin. Yangilangan hisob-kitob tasdiqlangandan so‘ng ish davom ettiriladi.</p>
-            <p>9.3. Eski shartnoma nusxasi tarixda saqlanadi, yangilangan nusxaga versiya raqami beriladi.</p>
-          </section>
-
-          <section class="legal-section">
-            <h2>10. TARAFLARNING JAVOBGARLIGI</h2>
-            <p>10.1. Taraflar majburiyatlarni bajarmagan yoki lozim darajada bajarmagan taqdirda ushbu shartnoma va amaldagi qonunchilik doirasida javobgar bo‘ladi.</p>
-            <p>10.2. Buyurtmachining noto‘g‘ri bergan o‘lchovi, yashirilgan kommunikatsiya yoki noto‘g‘ri ma’lumoti oqibatlari uchun Bajaruvchi javobgar bo‘lmaydi.</p>
-            <p>10.3. Bajaruvchi Buyurtmachining oldindan yozma roziligisiz shartnomaning muhim texnik tavsiflarini almashtirmaydi.</p>
-          </section>
-
-          <section class="legal-section">
-            <h2>11. FORS-MAJOR</h2>
-            <p>11.1. Yong‘in, suv toshqini, zilzila, epidemiya, urush, davlat organlarining cheklovlari, transport yoki elektr ta’minotidagi keng ko‘lamli uzilishlar va taraflar nazoratidan tashqaridagi boshqa favqulodda holatlar sabab majburiyat bajarilmasa, taraflar ushbu davr uchun javobgarlikdan ozod etiladi.</p>
-            <p>11.2. Fors-major yuzaga kelgan taraf imkon qadar tez boshqa tarafni xabardor qiladi.</p>
-          </section>
-
-          <section class="legal-section">
-            <h2>12. NIZOLARNI HAL QILISH</h2>
-            <p>12.1. Kelishmovchiliklar avvalo muzokara va yozma murojaat orqali hal qilinadi.</p>
-            <p>12.2. Muzokara orqali hal etilmagan nizo amaldagi qonunchilikda belgilangan tartibda ko‘rib chiqiladi.</p>
-          </section>
-
-          <section class="legal-section">
-            <h2>13. YAKUNIY QOIDALAR</h2>
-            <p>13.1. Shartnoma taraflar tasdiqlagan paytdan kuchga kiradi va majburiyatlar to‘liq bajarilgunga qadar amal qiladi.</p>
-            <p>13.2. Chizma, o‘lchov varaqasi, hisob-kitob, to‘lov tarixi, foto/video, qo‘shimcha kelishuv va Mebel360° tizimidagi tasdiqlar shartnomaning ajralmas qismi hisoblanadi.</p>
-            <p>13.3. Telefon raqami, manzil yoki boshqa rekvizit o‘zgarsa, taraflar bir-birini xabardor qiladi.</p>
-            <p>13.4. Shartnoma elektron ko‘rinishda mijoz kabinetiga avtomatik biriktiriladi. Buyurtmachi uni ko‘rishi, chop etishi va tasdiqlashi mumkin.</p>
-          </section>
-
-          <section class="legal-section details-section">
-            <h2>14. TARAFLARNING REKVIZITLARI</h2>
-            <div class="party-grid">
-              <div class="party-card">
-                <h3>BAJARUVCHI</h3>
-                <p><strong data-contract="seller.name">—</strong></p>
-                <p><b>Vakil:</b> <span data-contract="seller.representative">—</span></p>
-                <p><b>Manzil:</b> <span data-contract="seller.address">—</span></p>
-                <p><b>Telefon:</b> <span data-contract="seller.phone">—</span></p>
-                <p><b>STIR:</b> <span data-contract="seller.inn">—</span></p>
-                <p><b>Bank:</b> <span data-contract="seller.bank">—</span></p>
-                <p><b>H/r:</b> <span data-contract="seller.account">—</span></p>
-                <div class="signature-line">Imzo / muhr</div>
-              </div>
-              <div class="party-card">
-                <h3>BUYURTMACHI</h3>
-                <p><strong data-contract="customer.full_name">—</strong></p>
-                <p><b>Pasport/ID:</b> <span data-contract="customer.passport_id">—</span></p>
-                <p><b>Manzil:</b> <span data-contract="customer.address">—</span></p>
-                <p><b>Telefon:</b> <span data-contract="customer.phone">—</span></p>
-                <p><b>Elektron tasdiq:</b> <span id="contractElectronicApproval">Tasdiqlanmagan</span></p>
-                <div class="signature-line">Imzo</div>
-              </div>
-            </div>
-          </section>
-
-          <footer class="legal-footer">
-            <span>Mebel360° • Shartnoma № <span data-contract="contract.number">—</span></span>
-            <span>Versiya: <span data-contract="contract.version">—</span></span>
-          </footer>
-        </article>
-
-        <div class="contract-actions no-print">
-          <label class="contract-accept-row" id="contractAcceptRow">
-            <input id="contractAcceptCheckbox" type="checkbox">
-            <span data-i18n="acceptContractText">Shartnomaning barcha bandlarini o‘qidim va roziman.</span>
-          </label>
-          <div class="contract-button-row">
-            <button class="secondary-button compact-button" id="printContractBtn" type="button">🖨 <span data-i18n="printPdf">Chop etish / PDF</span></button>
-            <button class="primary-button compact-button" id="confirmContractBtn" type="button">
-              <span data-i18n="confirmContract">Shartnomani tasdiqlash</span>
-              <span class="button-arrow">✓</span>
-            </button>
-          </div>
-          <p class="contract-note" data-i18n="contractSavedNote">Tasdiq sanasi va vaqti tizimda saqlanadi.</p>
-        </div>
+        <p id="installHelp" class="install-help">Android Chrome menyusidan <b>“Ilovani o‘rnatish”</b> ni tanlang.</p>
       </div>
     </section>
 
-
-    <!-- 5. MIJOZ MUROJAATLARI -->
-    <section class="screen support-screen" id="supportScreen" aria-label="Mijoz murojaatlari">
-      <header class="screen-header support-header">
-        <button class="icon-button" type="button" data-back="contractScreen" aria-label="Orqaga">←</button>
-        <div class="support-header-title">
-          <strong data-i18n="supportCenter">Murojaatlar markazi</strong>
-          <small id="supportOrderCode">—</small>
-        </div>
-        <button class="icon-button theme-clone" type="button" aria-label="Rang mavzusini almashtirish">☀</button>
-      </header>
-
-      <div class="support-wrap">
-        <section class="support-hero">
-          <div>
-            <span class="eyebrow" data-i18n="directContact">To‘g‘ridan-to‘g‘ri aloqa</span>
-            <h2 data-i18n="managerHelp">Menejer sizga yordam beradi</h2>
-            <p data-i18n="supportSubtitle">Savolingiz buyurtma kodi bilan saqlanadi. Muhim masalani rahbarga yuborish mumkin.</p>
-          </div>
-          <span class="support-hero-icon">💬</span>
-        </section>
-
-        <section class="order-context-card">
-          <div class="order-context-icon">▣</div>
-          <div>
-            <span data-i18n="orderInfo">Buyurtma ma’lumoti</span>
-            <strong id="supportOrderName">—</strong>
-            <small id="supportOrderStatus">—</small>
-          </div>
-          <button class="tiny-action" id="newSupportRequestBtn" type="button" data-i18n="newRequest">Yangi murojaat</button>
-        </section>
-
-        <div class="ticket-strip" id="customerTicketList"></div>
-
-        <section class="conversation-card">
-          <div class="conversation-head">
-            <div>
-              <span class="eyebrow" id="customerConversationTopic" data-i18n="newRequest">Yangi murojaat</span>
-              <h3 id="customerConversationTitle" data-i18n="writeManager">Menejerga yozish</h3>
-            </div>
-            <span class="ticket-status" id="customerTicketStatus" hidden>Yangi</span>
-          </div>
-
-          <div class="message-list" id="customerMessageList">
-            <div class="empty-conversation">
-              <span>✉</span>
-              <strong data-i18n="noMessages">Hali xabar yo‘q</strong>
-              <p data-i18n="firstMessageHint">Mavzuni tanlang va birinchi xabaringizni yozing.</p>
-            </div>
-          </div>
-
-          <div class="ai-response-note">
-            <span class="ai-response-note-icon">✦</span>
-            <span>
-              <strong data-i18n="aiAssistant">Mebel360 AI yordamchi</strong>
-              <small data-i18n="aiAssistantHint">Xabaringizni darhol qabul qiladi va menejerga yetkazadi</small>
-            </span>
-          </div>
-
-          <form class="message-composer" id="customerMessageForm">
-            <div class="composer-topic" id="customerTopicFields">
-              <label>
-                <span data-i18n="topic">Mavzu</span>
-                <select id="customerSupportTopic" name="topic">
-                  <option value="Buyurtma jarayoni">Buyurtma jarayoni</option>
-                  <option value="Chizma yoki o‘lchov">Chizma yoki o‘lchov</option>
-                  <option value="To‘lov masalasi">To‘lov masalasi</option>
-                  <option value="O‘zgartirish kiritish">O‘zgartirish kiritish</option>
-                  <option value="Shikoyat yoki taklif">Shikoyat yoki taklif</option>
-                </select>
-              </label>
-              <label>
-                <span data-i18n="subject">Qisqa sarlavha</span>
-                <input id="customerSupportSubject" name="subject" maxlength="120" placeholder="Masalan: shkaf rangini o‘zgartirish">
-              </label>
-            </div>
-            <textarea id="customerMessageBody" name="body" rows="3" maxlength="2000" data-i18n-placeholder="messagePlaceholder" placeholder="Xabaringizni yozing..."></textarea>
-            <div class="composer-actions">
-              <label class="attachment-button" title="Fayl biriktirish">
-                <input id="customerAttachment" name="attachment" type="file" accept=".png,.jpg,.jpeg,.webp,.pdf,.doc,.docx,.xls,.xlsx">
-                <span>📎</span>
-                <small id="customerAttachmentName" data-i18n="attachFile">Fayl</small>
-              </label>
-              <button class="send-button" type="submit">
-                <span data-i18n="send">Yuborish</span><b>➤</b>
-              </button>
-            </div>
-          </form>
-        </section>
-
-        <button class="escalate-button" id="customerEscalateBtn" type="button" disabled>
-          <span>⚑</span>
-          <span><strong data-i18n="sendToDirector">Rahbarga yuborish</strong><small data-i18n="escalateHint">Masala menejer orqali hal bo‘lmasa foydalaning</small></span>
-        </button>
-      </div>
+    <section class="stats" aria-label="Platforma holati">
+      <article><b>360°</b><span>to‘liq nazorat</span></article>
+      <article><b>PWA</b><span>telefon va kompyuter</span></article>
+      <article><b>24/7</b><span>onlayn kirish</span></article>
+      <article><b>1.0</b><span>mobil qobiq</span></article>
     </section>
 
-    <!-- 6. MENEJER VA RAHBAR MUROJAATLAR KABINETI -->
-    <section class="screen staff-support-screen" id="staffSupportScreen" aria-label="Murojaatlar kabineti">
-      <header class="screen-header staff-support-header">
-        <button class="icon-button" type="button" data-back="roleScreen" aria-label="Orqaga">←</button>
-        <div class="support-header-title">
-          <strong id="staffInboxTitle">Murojaatlar kabineti</strong>
-          <small id="staffRoleLabel">Menejer</small>
-        </div>
-        <button class="icon-button theme-clone" type="button" aria-label="Rang mavzusini almashtirish">☀</button>
-      </header>
-
-      <div class="staff-support-wrap">
-        <section class="staff-metrics">
-          <article><span>◉</span><div><small data-i18n="allRequests">Jami</small><strong id="metricAll">0</strong></div></article>
-          <article><span>●</span><div><small data-i18n="newRequests">Yangi</small><strong id="metricNew">0</strong></div></article>
-          <article><span>⚑</span><div><small data-i18n="importantRequests">Muhim</small><strong id="metricEscalated">0</strong></div></article>
-          <article><span>✉</span><div><small data-i18n="unreadRequests">O‘qilmagan</small><strong id="metricUnread">0</strong></div></article>
-        </section>
-
-        <div class="staff-support-grid">
-          <aside class="staff-ticket-panel">
-            <div class="panel-title-row">
-              <div><span class="eyebrow" data-i18n="customerRequests">Mijoz murojaatlari</span><h2 data-i18n="inbox">Kiruvchi xabarlar</h2></div>
-              <button class="round-refresh" id="refreshStaffInboxBtn" type="button" aria-label="Yangilash">↻</button>
-            </div>
-            <div class="filter-chips" id="staffFilterChips">
-              <button class="filter-chip active" type="button" data-filter="all" data-i18n="all">Barchasi</button>
-              <button class="filter-chip" type="button" data-filter="new" data-i18n="newRequests">Yangi</button>
-              <button class="filter-chip" type="button" data-filter="escalated" data-i18n="importantRequests">Muhim</button>
-              <button class="filter-chip" type="button" data-filter="closed" data-i18n="closed">Yopilgan</button>
-            </div>
-            <div class="staff-ticket-list" id="staffTicketList"></div>
-          </aside>
-
-          <section class="staff-conversation-panel" id="staffConversationPanel">
-            <div class="staff-empty-state" id="staffEmptyState">
-              <span>💬</span><strong data-i18n="selectRequest">Murojaatni tanlang</strong><p data-i18n="selectRequestHint">Mijoz yozishmasi shu yerda ochiladi.</p>
-            </div>
-            <div id="staffConversationContent" hidden>
-              <header class="staff-conversation-head">
-                <div>
-                  <span class="eyebrow" id="staffTicketOrder">—</span>
-                  <h2 id="staffTicketCustomer">—</h2>
-                  <p id="staffTicketTopic">—</p>
-                </div>
-                <span class="ticket-status" id="staffTicketStatus">—</span>
-              </header>
-
-              <div class="staff-ticket-tools">
-                <select id="staffStatusSelect" aria-label="Murojaat holati">
-                  <option>Yangi</option><option>Ko‘rib chiqilmoqda</option><option>Javob berildi</option><option>Hal qilindi</option><option>Yopildi</option>
-                </select>
-                <button id="saveStaffStatusBtn" type="button" data-i18n="saveStatus">Holatni saqlash</button>
-                <button class="staff-escalate" id="staffEscalateBtn" type="button">⚑ <span data-i18n="sendToDirector">Rahbarga yuborish</span></button>
-              </div>
-
-              <div class="message-list staff-message-list" id="staffMessageList"></div>
-
-              <form class="message-composer staff-composer" id="staffReplyForm">
-                <textarea id="staffReplyBody" name="body" rows="3" maxlength="2000" data-i18n-placeholder="replyPlaceholder" placeholder="Mijozga javob yozing..."></textarea>
-                <div class="composer-actions">
-                  <label class="attachment-button">
-                    <input id="staffAttachment" name="attachment" type="file" accept=".png,.jpg,.jpeg,.webp,.pdf,.doc,.docx,.xls,.xlsx">
-                    <span>📎</span><small id="staffAttachmentName" data-i18n="attachFile">Fayl</small>
-                  </label>
-                  <button class="send-button" type="submit"><span data-i18n="reply">Javob berish</span><b>➤</b></button>
-                </div>
-              </form>
-            </div>
-          </section>
-        </div>
+    <section id="modules" class="modules">
+      <div class="section-head"><span>ASOSIY YO‘NALISHLAR</span><h2>Mebel360° bo‘limlari</h2></div>
+      <div class="grid">
+        <button class="module" data-module="Buyurtmalar"><i>📋</i><b>Buyurtmalar</b><span>Mijoz va loyiha bosqichlari</span></button>
+        <button class="module" data-module="Konstruktor"><i>📐</i><b>Konstruktor</b><span>Chizma, detal va kroy</span></button>
+        <button class="module" data-module="Ishlab chiqarish"><i>🏭</i><b>Ishlab chiqarish</b><span>Ishchi va jarayon nazorati</span></button>
+        <button class="module" data-module="Ombor"><i>📦</i><b>Ombor</b><span>Material kirim-chiqimi</span></button>
+        <button class="module" data-module="Moliya"><i>📊</i><b>Moliya</b><span>Kirim, chiqim va hisobot</span></button>
+        <button class="module" data-module="Mijoz kabineti"><i>👤</i><b>Mijoz kabineti</b><span>Buyurtmani kuzatish</span></button>
       </div>
     </section>
-
-    <div id="toast" class="toast" role="status"></div>
   </main>
 
-  <script src="{{ url_for('static', filename='js/app.js', v='20260723-6') }}"></script>
+  <footer>© {{ year }} Mebel360°. Barcha huquqlar himoyalangan.</footer>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="{{ url_for('static', filename='app.js') }}?v=1.0.0" defer></script>
 </body>
 </html>
