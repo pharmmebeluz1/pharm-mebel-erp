@@ -87,6 +87,54 @@ def _money(value):
         return "0"
 
 
+def _currency_code(value):
+    """Dasturda ishlatiladigan valyutani xavfsiz normal holatga keltiradi."""
+    code=str(value or "UZS").strip().upper()
+    return code if code in {"UZS", "USD"} else "UZS"
+
+
+def _currency_money(value, currency="UZS"):
+    """Kelishuv valyutasidagi summani foydalanuvchiga tushunarli ko‘rsatadi."""
+    code=_currency_code(currency)
+    try:
+        number=float(value or 0)
+    except (TypeError, ValueError):
+        number=0.0
+    if code=="USD":
+        decimals=2 if abs(number-round(number))>0.000001 else 0
+        return "$"+f"{number:,.{decimals}f}".replace(",", " ")
+    return _money(number)+" so‘m"
+
+
+def _payment_conversion(order_currency, payment_currency, received_amount, usd_rate=0):
+    """Qabul qilingan pulni buyurtma valyutasi va UZS ekvivalentiga aylantiradi.
+
+    USD qatnashgan har bir to‘lovda aynan o‘sha to‘lov kunidagi kurs saqlanadi.
+    Eski to‘lovlar va UZS→UZS hisobida kurs 1 bo‘lib qoladi.
+    """
+    order_code=_currency_code(order_currency)
+    payment_code=_currency_code(payment_currency)
+    received=float(received_amount or 0)
+    rate=float(usd_rate or 0)
+    if received<=0:
+        raise ValueError("To‘lov summasi 0 dan katta bo‘lsin.")
+    if "USD" in {order_code,payment_code} and rate<=0:
+        raise ValueError("USD qatnashgan to‘lov uchun to‘lov kunidagi 1 USD kursini kiriting.")
+    if order_code==payment_code:
+        order_amount=received
+    elif order_code=="USD" and payment_code=="UZS":
+        order_amount=received/rate
+    elif order_code=="UZS" and payment_code=="USD":
+        order_amount=received*rate
+    else:
+        raise ValueError("Bu valyuta juftligi qo‘llab-quvvatlanmaydi.")
+    if payment_code=="UZS":
+        uzs_equivalent=received
+    else:
+        uzs_equivalent=received*rate
+    return round(order_amount,2),round(uzs_equivalent,2),rate if rate>0 else 1.0
+
+
 DB_NAME = os.environ.get("PHARM_ERP_DB", "pharm_mebel_erp_pro.db")
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONSTRUCTOR_UPLOAD_DIR = os.path.join(_APP_DIR, "uploads", "konstruktor")
@@ -130,7 +178,7 @@ PHARM_I18N_WIDGET = '\n<!-- PHARM_MEBEL_3_LANGUAGE_SYSTEM_V2 -->\n<style id="pha
 # ---------- MEBEL360° PWA / TELEFON ILOVASI ----------
 MEBEL360_PWA_HEAD = r"""
 <!-- MEBEL360_PWA_V5 -->
-<link rel="manifest" href="/manifest.webmanifest?v=5">
+<link rel="manifest" href="/manifest.webmanifest?v=6">
 <meta name="theme-color" content="#0757a6">
 <meta name="application-name" content="Mebel360°">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -152,7 +200,7 @@ MEBEL360_PWA_BODY = r"""
   'use strict';
   if('serviceWorker' in navigator){
     window.addEventListener('load', function(){
-      navigator.serviceWorker.register('/service-worker.js?v=4', {scope:'/'}).catch(function(){});
+      navigator.serviceWorker.register('/service-worker.js?v=6', {scope:'/'}).catch(function(){});
     });
   }
   var deferredPrompt = null;
@@ -204,7 +252,7 @@ def mebel360_manifest():
 @app.route('/service-worker.js')
 def mebel360_service_worker():
     js = r"""
-const CACHE='mebel360-static-v5';
+const CACHE='mebel360-static-v6';
 const STATIC=['/offline.html','/static/mebel360-logo.png?v=20260722','/static/icons/icon-192.png?v=5','/static/icons/icon-512.png?v=5'];
 self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE).then(c=>c.addAll(STATIC)).then(()=>self.skipWaiting()))});
 self.addEventListener('activate',event=>{event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim()))});
@@ -1073,6 +1121,35 @@ def init_db():
     for col,typ in migrations.items():
         if col not in order_cols:
             conn.execute(f"ALTER TABLE buyurtmalar ADD COLUMN {col} {typ}")
+
+    # V5.2 migratsiya: UZS / USD va to‘lov kunidagi kurs bo‘yicha hisob
+    order_currency_cols={r[1] for r in conn.execute("PRAGMA table_info(buyurtmalar)").fetchall()}
+    for col,typ in {
+        "valyuta":"TEXT DEFAULT 'UZS'",
+        "kurs_tartibi":"TEXT DEFAULT 'To‘lov kunidagi kurs'",
+        "oxirgi_kurs":"REAL DEFAULT 0"
+    }.items():
+        if col not in order_currency_cols:
+            conn.execute(f"ALTER TABLE buyurtmalar ADD COLUMN {col} {typ}")
+    conn.execute("UPDATE buyurtmalar SET valyuta='UZS' WHERE valyuta IS NULL OR TRIM(valyuta)='' ")
+    conn.execute("UPDATE buyurtmalar SET kurs_tartibi='To‘lov kunidagi kurs' WHERE kurs_tartibi IS NULL OR TRIM(kurs_tartibi)='' ")
+
+    payment_currency_cols={r[1] for r in conn.execute("PRAGMA table_info(buyurtma_tolovlari)").fetchall()}
+    for col,typ in {
+        "tolov_valyutasi":"TEXT DEFAULT 'UZS'",
+        "kurs":"REAL DEFAULT 1",
+        "qabul_qilingan_summa":"REAL DEFAULT 0",
+        "buyurtma_summa":"REAL DEFAULT 0",
+        "uzs_ekvivalent":"REAL DEFAULT 0"
+    }.items():
+        if col not in payment_currency_cols:
+            conn.execute(f"ALTER TABLE buyurtma_tolovlari ADD COLUMN {col} {typ}")
+    conn.execute("UPDATE buyurtma_tolovlari SET tolov_valyutasi='UZS' WHERE tolov_valyutasi IS NULL OR TRIM(tolov_valyutasi)='' ")
+    conn.execute("UPDATE buyurtma_tolovlari SET kurs=1 WHERE kurs IS NULL OR kurs<=0")
+    conn.execute("UPDATE buyurtma_tolovlari SET qabul_qilingan_summa=miqdor WHERE COALESCE(qabul_qilingan_summa,0)=0 AND COALESCE(miqdor,0)<>0")
+    conn.execute("UPDATE buyurtma_tolovlari SET buyurtma_summa=miqdor WHERE COALESCE(buyurtma_summa,0)=0 AND COALESCE(miqdor,0)<>0")
+    conn.execute("UPDATE buyurtma_tolovlari SET uzs_ekvivalent=miqdor WHERE COALESCE(uzs_ekvivalent,0)=0 AND COALESCE(miqdor,0)<>0")
+
     stage_cols={r[1] for r in conn.execute("PRAGMA table_info(buyurtma_bosqichlari)").fetchall()}
     for col,typ in {"boshlanish_vaqti":"TEXT DEFAULT ''","tugash_vaqti":"TEXT DEFAULT ''","ishchi":"TEXT DEFAULT ''","izoh":"TEXT DEFAULT ''","media_url":"TEXT DEFAULT ''"}.items():
         if col not in stage_cols: conn.execute(f"ALTER TABLE buyurtma_bosqichlari ADD COLUMN {col} {typ}")
@@ -1155,6 +1232,11 @@ def generate_order_contract(oid):
     base=f"{_safe_filename(order['kod'])}_shartnoma_v{version}"
     docx_path=os.path.join(_contract_dir(),base+".docx")
     pdf_path=os.path.join(_contract_dir(),base+".pdf")
+    order_currency=_currency_code(order["valyuta"] if "valyuta" in order.keys() else "UZS")
+    currency_name="AQSh dollari (USD)" if order_currency=="USD" else "O‘zbekiston so‘mi (UZS)"
+    currency_rule=("So‘mda amalga oshirilgan har bir to‘lov to‘lov kunida kiritilgan 1 USD kursi bo‘yicha "
+                   "AQSh dollaridagi qarzdorlikdan ayriladi." if order_currency=="USD" else
+                   "Hisob-kitob O‘zbekiston so‘mida amalga oshiriladi.")
 
     # DOCX
     doc=Document()
@@ -1189,17 +1271,20 @@ def generate_order_contract(oid):
         cell.text=h
         cell.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
     vals=[order['kod'],order['mahsulot'],order['olcham'],order['soni'],
-          order['material'],order['rang'],_fmt_money(order['umumiy_narx'])+" so‘m"]
+          order['material'],order['rang'],_currency_money(order['umumiy_narx'],order_currency)]
     for i,v in enumerate(vals):
         table.rows[1].cells[i].text=str(v or "")
 
     doc.add_heading("3. TO‘LOV TARTIBI", level=1)
-    _add_docx_field(doc,"Umumiy summa",_fmt_money(order['umumiy_narx'])+" so‘m")
-    _add_docx_field(doc,"Avans",_fmt_money(order['oldindan_tolov'])+" so‘m")
-    _add_docx_field(doc,"Oraliq to‘lov",_fmt_money(order['oraliq_tolov'])+" so‘m")
+    _add_docx_field(doc,"Kelishuv valyutasi",currency_name)
+    _add_docx_field(doc,"Umumiy summa",_currency_money(order['umumiy_narx'],order_currency))
+    _add_docx_field(doc,"Avans",_currency_money(order['oldindan_tolov'],order_currency))
+    _add_docx_field(doc,"Oraliq to‘lov",_currency_money(order['oraliq_tolov'],order_currency))
     qoldiq=float(order['umumiy_narx'] or 0)-float(order['oldindan_tolov'] or 0)-float(order['oraliq_tolov'] or 0)
-    _add_docx_field(doc,"Qoldiq",_fmt_money(max(0,qoldiq))+" so‘m")
+    _add_docx_field(doc,"Qoldiq",_currency_money(max(0,qoldiq),order_currency))
+    _add_docx_field(doc,"Kurs tartibi",order['kurs_tartibi'] if 'kurs_tartibi' in order.keys() else 'To‘lov kunidagi kurs')
     _add_docx_field(doc,"To‘lov usuli",order['tolov_usuli'])
+    doc.add_paragraph(currency_rule)
 
     doc.add_heading("4. MUDDAT, YETKAZISH VA MONTAJ", level=1)
     _add_docx_field(doc,"Boshlanish sanasi",order['boshlanish_sana'])
@@ -1272,10 +1357,12 @@ def generate_order_contract(oid):
         ("Telefon",order['telefon']),("Manzil",order['manzil']),
         ("Mahsulot",order['mahsulot']),("O'lcham",order['olcham']),
         ("Soni",order['soni']),("Material",order['material']),("Rang",order['rang']),
-        ("Umumiy summa",_fmt_money(order['umumiy_narx'])+" so'm"),
-        ("Avans",_fmt_money(order['oldindan_tolov'])+" so'm"),
-        ("Oraliq to'lov",_fmt_money(order['oraliq_tolov'])+" so'm"),
-        ("Qoldiq",_fmt_money(max(0,qoldiq))+" so'm"),
+        ("Kelishuv valyutasi",currency_name),
+        ("Umumiy summa",_currency_money(order['umumiy_narx'],order_currency)),
+        ("Avans",_currency_money(order['oldindan_tolov'],order_currency)),
+        ("Oraliq to'lov",_currency_money(order['oraliq_tolov'],order_currency)),
+        ("Qoldiq",_currency_money(max(0,qoldiq),order_currency)),
+        ("Kurs tartibi",order['kurs_tartibi'] if 'kurs_tartibi' in order.keys() else "To'lov kunidagi kurs"),
         ("To'lov usuli",order['tolov_usuli']),
         ("Boshlanish",order['boshlanish_sana']),("Tugash",order['tugash_sana'] or order['taxminiy_sana']),
         ("Yetkazish",order['yetkazish']),("Montaj",order['montaj']),
@@ -1872,6 +1959,16 @@ def orders():
         try:
             order_type=d.get("buyurtma_turi","To‘liq mebel") or "To‘liq mebel"
             payment_condition=d.get("tolov_sharti","Avans majburiy") or "Avans majburiy"
+            order_currency=_currency_code(d.get("valyuta","UZS"))
+            initial_received=float(d.get("oldindan_tolov") or 0)
+            initial_payment_currency=_currency_code(d.get("boshlangich_tolov_valyutasi") or order_currency)
+            initial_rate=float(d.get("boshlangich_kurs") or 0)
+            initial_order_amount=0.0
+            initial_uzs=0.0
+            if initial_received>0:
+                initial_order_amount,initial_uzs,initial_rate=_payment_conversion(
+                    order_currency,initial_payment_currency,initial_received,initial_rate
+                )
             columns=[
                 "kod","mijoz","telefon","manzil","mahsulot","umumiy_narx","oldindan_tolov",
                 "boshlanish_sana","tugash_sana","taxminiy_sana","taxminiy_vaqt","holat","izoh","tracking_token",
@@ -1882,11 +1979,12 @@ def orders():
                 "tolov_usuli","oraliq_tolov","montaj","yetkazish","kafolat_muddati",
                 "buyurtma_turi","tolov_sharti","avans_talab","avans_muddat_sana","taklif_amal_sana",
                 "chizma_versiya","bepul_ozgarish_limit","ozgarish_soni","muddat_tartibi",
-                "ishlab_chiqarish_kun","rasmiy_muddat_sana","rasmiy_muddat_vaqt"
+                "ishlab_chiqarish_kun","rasmiy_muddat_sana","rasmiy_muddat_vaqt",
+                "valyuta","kurs_tartibi","oxirgi_kurs"
             ]
             values=[
                 d["kod"],d["mijoz"],d.get("telefon",""),d.get("manzil",""),d.get("mahsulot",""),
-                float(d.get("umumiy_narx") or 0),float(d.get("oldindan_tolov") or 0),
+                float(d.get("umumiy_narx") or 0),initial_order_amount,
                 d.get("boshlanish_sana",""),d.get("tugash_sana",""),d.get("taxminiy_sana",""),
                 _safe_time(d.get("taxminiy_vaqt")),d.get("holat","Yangi"),d.get("izoh",""),secrets.token_urlsafe(8),
                 float(d.get("kechikish_foiz") or 0),float(d.get("maks_chegirma_foiz") or 20),
@@ -1902,7 +2000,8 @@ def orders():
                 order_type,payment_condition,float(d.get("avans_talab") or 0),d.get("avans_muddat_sana",""),
                 d.get("taklif_amal_sana",""),int(d.get("chizma_versiya") or 1),
                 int(d.get("bepul_ozgarish_limit") or 2),int(d.get("ozgarish_soni") or 0),
-                "Tasdiqdan keyin",int(d.get("ishlab_chiqarish_kun") or 0),"",_safe_time(d.get("taxminiy_vaqt"))
+                "Tasdiqdan keyin",int(d.get("ishlab_chiqarish_kun") or 0),"",_safe_time(d.get("taxminiy_vaqt")),
+                order_currency,"To‘lov kunidagi kurs",initial_rate if initial_rate>1 else 0
             ]
             sql=f"INSERT INTO buyurtmalar({','.join(columns)}) VALUES({','.join('?' for _ in columns)})"
             cur=c.execute(sql,values)
@@ -1910,6 +2009,14 @@ def orders():
             workflow=_workflow_stages(order_type,payment_condition,d.get("maxsus_bosqichlar",""))
             c.executemany("INSERT INTO buyurtma_bosqichlari(buyurtma_id,bosqich) VALUES(?,?)",
                           [(oid,s) for s in workflow])
+            if initial_received>0:
+                c.execute("""INSERT INTO buyurtma_tolovlari
+                    (buyurtma_id,sana,miqdor,turi,izoh,tolov_valyutasi,kurs,
+                     qabul_qilingan_summa,buyurtma_summa,uzs_ekvivalent)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (oid,d.get("boshlangich_tolov_sana") or _tashkent_today(),initial_order_amount,
+                     "Avans",d.get("boshlangich_tolov_izoh","") or "Buyurtma yaratilganda kiritildi",
+                     initial_payment_currency,initial_rate,initial_received,initial_order_amount,initial_uzs))
             if payment_condition=="Avans talab qilinmaydi — ishonchli mijoz":
                 _complete_order_stage(c,oid,"Avans talab qilinmaydi","Ishonchli mijoz uchun avans talab qilinmaydi")
                 c.execute("UPDATE buyurtmalar SET holat='Rahbar tasdiqlashi kutilmoqda' WHERE id=?",(oid,))
@@ -1954,6 +2061,19 @@ def orders():
                 item["muddat_matn"]="Avansdan keyin"
         else:
             item["muddat_matn"]="Belgilanmagan"
+        currency=_currency_code(item.get("valyuta","UZS"))
+        rate=float(item.get("oxirgi_kurs") or 0)
+        item["valyuta"]=currency
+        item["umumiy_uzs"]=round(float(item.get("umumiy_narx") or 0)*(rate if currency=="USD" else 1),2) if (currency=="UZS" or rate>0) else 0
+        item["qoldiq_uzs"]=round(float(item.get("qoldiq") or 0)*(rate if currency=="USD" else 1),2) if (currency=="UZS" or rate>0) else 0
+        stage_stats=c.execute("SELECT COUNT(*) jami,COALESCE(SUM(bajarildi),0) bajarildi FROM buyurtma_bosqichlari WHERE buyurtma_id=?",(item["id"],)).fetchone()
+        item["bosqich_jami"]=int(stage_stats["jami"] or 0)
+        item["bosqich_bajarildi"]=int(stage_stats["bajarildi"] or 0)
+        item["progress"]=round(item["bosqich_bajarildi"]*100/item["bosqich_jami"],1) if item["bosqich_jami"] else 0
+        current_stage=c.execute("SELECT bosqich FROM buyurtma_bosqichlari WHERE buyurtma_id=? AND bajarildi=0 ORDER BY id LIMIT 1",(item["id"],)).fetchone()
+        item["joriy_bosqich"]=current_stage["bosqich"] if current_stage else ("Yakunlandi" if item["bosqich_jami"] else "Bosqich yo‘q")
+        paid_uzs=c.execute("SELECT COALESCE(SUM(uzs_ekvivalent),0) jami FROM buyurtma_tolovlari WHERE buyurtma_id=?",(item["id"],)).fetchone()
+        item["tolangan_uzs"]=round(float(paid_uzs["jami"] or 0),2)
         result.append(item)
     c.close(); return jsonify(result)
 
@@ -2246,19 +2366,40 @@ def worker_statuses():
 @app.route("/api/buyurtma/<int:oid>/tolovlar", methods=["GET","POST"])
 def order_payments(oid):
     c=get_db()
+    order=c.execute("SELECT * FROM buyurtmalar WHERE id=?",(oid,)).fetchone()
+    if not order:
+        c.close(); return jsonify({"message":"Buyurtma topilmadi"}),404
     if request.method=="POST":
-        d=jdata(); amount=float(d.get("miqdor") or 0)
-        c.execute("INSERT INTO buyurtma_tolovlari(buyurtma_id,sana,miqdor,turi,izoh) VALUES(?,?,?,?,?)",
-                  (oid,d["sana"],amount,d.get("turi","To‘lov"),d.get("izoh","")))
-        c.execute("UPDATE buyurtmalar SET oldindan_tolov=oldindan_tolov+? WHERE id=?",(amount,oid))
-        updated=c.execute("SELECT * FROM buyurtmalar WHERE id=?",(oid,)).fetchone()
-        deadline_result={}
-        if amount>0 and _payment_ready(updated):
-            condition=str(updated["tolov_sharti"] or "Avans majburiy")
-            pay_stage="Qisman avans olindi" if condition=="Qisman avans" else "Avans olindi"
-            _complete_order_stage(c,oid,pay_stage,"Avans summasi talabga yetdi")
-            deadline_result=_start_official_deadline(c,oid,"Avans qabul qilindi — rasmiy muddat boshlandi")
-        c.commit(); c.close(); return jsonify({"status":"ok","deadline":deadline_result})
+        try:
+            d=jdata()
+            received=float(d.get("qabul_qilingan_summa",d.get("miqdor")) or 0)
+            payment_currency=_currency_code(d.get("tolov_valyutasi") or order["valyuta"] or "UZS")
+            order_currency=_currency_code(order["valyuta"] or "UZS")
+            order_amount,uzs_equivalent,rate=_payment_conversion(
+                order_currency,payment_currency,received,float(d.get("kurs") or 0)
+            )
+            c.execute("""INSERT INTO buyurtma_tolovlari
+                (buyurtma_id,sana,miqdor,turi,izoh,tolov_valyutasi,kurs,
+                 qabul_qilingan_summa,buyurtma_summa,uzs_ekvivalent)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (oid,d.get("sana") or _tashkent_today(),order_amount,d.get("turi","To‘lov"),
+                 d.get("izoh",""),payment_currency,rate,received,order_amount,uzs_equivalent))
+            c.execute("""UPDATE buyurtmalar SET oldindan_tolov=oldindan_tolov+?,
+                oxirgi_kurs=CASE WHEN ?>1 THEN ? ELSE oxirgi_kurs END WHERE id=?""",
+                (order_amount,rate,rate,oid))
+            updated=c.execute("SELECT * FROM buyurtmalar WHERE id=?",(oid,)).fetchone()
+            deadline_result={}
+            if order_amount>0 and _payment_ready(updated):
+                condition=str(updated["tolov_sharti"] or "Avans majburiy")
+                pay_stage="Qisman avans olindi" if condition=="Qisman avans" else "Avans olindi"
+                _complete_order_stage(c,oid,pay_stage,"Avans summasi talabga yetdi")
+                deadline_result=_start_official_deadline(c,oid,"Avans qabul qilindi — rasmiy muddat boshlandi")
+            c.commit(); c.close()
+            return jsonify({"status":"ok","deadline":deadline_result,
+                            "buyurtma_summa":order_amount,"uzs_ekvivalent":uzs_equivalent,
+                            "buyurtma_valyutasi":order_currency})
+        except Exception as e:
+            c.rollback(); c.close(); return jsonify({"message":str(e)}),400
     rows=c.execute("SELECT * FROM buyurtma_tolovlari WHERE buyurtma_id=? ORDER BY sana DESC,id DESC",(oid,)).fetchall(); c.close()
     return jsonify([dict(r) for r in rows])
 
@@ -2274,7 +2415,7 @@ def finished_goods():
 def finance_summary():
     start=request.args.get("start") or "1900-01-01"; end=request.args.get("end") or "2999-12-31"
     c=get_db()
-    income=c.execute("SELECT COALESCE(SUM(oldindan_tolov),0) FROM buyurtmalar WHERE date(created_at) BETWEEN ? AND ?",(start,end)).fetchone()[0]
+    income=c.execute("SELECT COALESCE(SUM(uzs_ekvivalent),0) FROM buyurtma_tolovlari WHERE sana BETWEEN ? AND ?",(start,end)).fetchone()[0]
     expense=c.execute("SELECT COALESCE(SUM(miqdor),0) FROM xarajatlar WHERE sana BETWEEN ? AND ?",(start,end)).fetchone()[0]
     salary=c.execute("SELECT COALESCE(SUM(miqdor),0) FROM tolovlar WHERE sana BETWEEN ? AND ?",(start,end)).fetchone()[0]
     bonus=c.execute("SELECT COALESCE(SUM(miqdor),0) FROM bonuslar WHERE sana BETWEEN ? AND ?",(start,end)).fetchone()[0]
@@ -2416,6 +2557,7 @@ def public_track(token):
     total=float(order["umumiy_narx"] or 0)
     paid=float(order["oldindan_tolov"] or 0)
     remaining=max(0,total-paid)
+    currency=_currency_code(order["valyuta"] if "valyuta" in order.keys() else "UZS")
     contact=str(order["aloqa_telefon"] or os.environ.get("MEBEL360_PUBLIC_PHONE","")).strip()
     contact_digits="".join(ch for ch in contact if ch.isdigit())
     if contact_digits.startswith("0") and len(contact_digits)==10:
@@ -2441,7 +2583,12 @@ def public_track(token):
         if int(s["bajarildi"] or 0):
             timeline.append({"time":str(s["tugash_vaqti"] or s["boshlanish_vaqti"] or ""),"title":str(s["bosqich"]),"detail":str(s["izoh"] or "Bosqich yakunlandi")})
     for pay in pays:
-        timeline.append({"time":str(pay["sana"] or ""),"title":"To‘lov qabul qilindi","detail":_money(pay["miqdor"])+" so‘m"})
+        pay_currency=_currency_code(pay["tolov_valyutasi"] if "tolov_valyutasi" in pay.keys() else currency)
+        received=pay["qabul_qilingan_summa"] if "qabul_qilingan_summa" in pay.keys() and pay["qabul_qilingan_summa"] else pay["miqdor"]
+        detail=_currency_money(received,pay_currency)
+        if currency=="USD" and pay_currency=="UZS" and float(pay["kurs"] or 0)>0:
+            detail+=f" · kurs {_money(pay['kurs'])} · {_currency_money(pay['miqdor'],'USD')} hisoblandi"
+        timeline.append({"time":str(pay["sana"] or ""),"title":"To‘lov qabul qilindi","detail":detail})
     for h in deadline_history:
         timeline.append({"time":str(h["created_at"] or ""),"title":"Muddat yangilandi","detail":f"{h['yangi_sana']} {h['yangi_vaqt']} · {h['sabab'] or 'Sabab ko‘rsatilmagan'}"})
     timeline.sort(key=lambda x:x["time"],reverse=True)
@@ -2464,7 +2611,7 @@ def public_track(token):
         <div class="metrics">
           <div class="metric"><small>BAJARILDI</small><strong>{{pct}}%</strong></div>
           <div class="metric"><small>QOLGAN VAQT</small><strong id="countdown" class="countdown">Hisoblanmoqda…</strong></div>
-          <div class="metric"><small>QOLDIQ TO‘LOV</small><strong class="balance">{{money(remaining)}} so‘m</strong></div>
+          <div class="metric"><small>QOLDIQ TO‘LOV</small><strong class="balance">{{format_money(remaining,currency)}}</strong></div>
         </div>
         <div class="bar"><div class="fill" style="width:{{pct}}%"></div></div>
       </section>
@@ -2475,8 +2622,8 @@ def public_track(token):
           <div class="fact"><small>Rang</small><b><span class="swatch" style="background:{{rang_css}}"></span>{{o['rang'] or 'Belgilanmagan'}}{% if o['rang_kodi'] %} · {{o['rang_kodi']}}{% endif %}</b></div>
           <div class="fact"><small>Material</small><b>{{o['material'] or 'Belgilanmagan'}}</b></div><div class="fact"><small>Yaltiroqlik</small><b>{{o['yaltiroqlik'] or 'Belgilanmagan'}}</b></div><div class="fact"><small>Mas’ul xodim</small><b>{{o['masul_xodim'] or 'Belgilanmagan'}}</b></div>
         </div>{% if o['mijozga_izoh'] %}<div class="notice customer-note"><b>Mebel360° izohi:</b><br>{{o['mijozga_izoh']}}</div>{% endif %}{% if o['kechikish_sababi'] %}<div class="notice"><b>Muddat bo‘yicha izoh:</b><br>{{o['kechikish_sababi']}}</div>{% endif %}</section>
-        <section class="card"><h3>💳 To‘lov holati</h3><div class="money-grid"><div class="money-box"><small>Umumiy narx</small><b>{{money(total)}} so‘m</b></div><div class="money-box"><small>To‘langan</small><b style="color:#15803d">{{money(paid)}} so‘m</b></div><div class="money-box"><small>Qoldiq</small><b class="balance">{{money(remaining)}} so‘m</b></div></div>
-        {% if o['tolov_sharti']=='Avans talab qilinmaydi — ishonchli mijoz' %}<div class="notice customer-note">🤝 Ishonchli mijoz: avans talab qilinmaydi. Rasmiy muddat rahbar tasdig‘idan keyin boshlanadi.</div>{% elif remaining>0 %}<div class="notice">Buyurtma tayyor bo‘lishidan oldin <b>{{money(remaining)}} so‘m</b> qoldiq to‘lov mavjud.</div>{% else %}<div class="notice customer-note">✅ Buyurtma to‘lovi to‘liq amalga oshirilgan.</div>{% endif %}{% if o['taklif_amal_sana'] %}<div class="notice"><b>Narx taklifi amal qiladi:</b> {{o['taklif_amal_sana']}} gacha.</div>{% endif %}{% if o['avans_muddat_sana'] and not workflow_started %}<div class="notice"><b>Avans muddati:</b> {{o['avans_muddat_sana']}} gacha.</div>{% endif %}{% if contact %}<div class="actions"><a class="btn" href="tel:{{contact}}">📞 Qo‘ng‘iroq</a>{% if whatsapp %}<a class="btn green" href="{{whatsapp}}" target="_blank">💬 Savol berish</a>{% endif %}</div>{% endif %}</section>
+        <section class="card"><h3>💳 To‘lov holati</h3><div class="money-grid"><div class="money-box"><small>Umumiy narx</small><b>{{format_money(total,currency)}}</b></div><div class="money-box"><small>To‘langan</small><b style="color:#15803d">{{format_money(paid,currency)}}</b></div><div class="money-box"><small>Qoldiq</small><b class="balance">{{format_money(remaining,currency)}}</b></div></div>
+        {% if o['tolov_sharti']=='Avans talab qilinmaydi — ishonchli mijoz' %}<div class="notice customer-note">🤝 Ishonchli mijoz: avans talab qilinmaydi. Rasmiy muddat rahbar tasdig‘idan keyin boshlanadi.</div>{% elif remaining>0 %}<div class="notice">Buyurtma tayyor bo‘lishidan oldin <b>{{format_money(remaining,currency)}}</b> qoldiq to‘lov mavjud.</div>{% else %}<div class="notice customer-note">✅ Buyurtma to‘lovi to‘liq amalga oshirilgan.</div>{% endif %}{% if o['taklif_amal_sana'] %}<div class="notice"><b>Narx taklifi amal qiladi:</b> {{o['taklif_amal_sana']}} gacha.</div>{% endif %}{% if o['avans_muddat_sana'] and not workflow_started %}<div class="notice"><b>Avans muddati:</b> {{o['avans_muddat_sana']}} gacha.</div>{% endif %}{% if contact %}<div class="actions"><a class="btn" href="tel:{{contact}}">📞 Qo‘ng‘iroq</a>{% if whatsapp %}<a class="btn green" href="{{whatsapp}}" target="_blank">💬 Savol berish</a>{% endif %}</div>{% endif %}</section>
       </div>
       <div class="grid">
         <section class="card"><h3>🛠 Buyurtma bosqichlari</h3><div class="stage-list">{% for s in stages %}<div class="stage {{'done' if s['bajarildi'] else 'current' if s['bosqich']==current_stage else ''}}"><div class="dot">{{'✓' if s['bajarildi'] else loop.index}}</div><div><b>{{s['bosqich']}}</b><small>{% if s['bajarildi'] %}Yakunlandi{% if s['tugash_vaqti'] %} · {{s['tugash_vaqti']}}{% endif %}{% else %}Navbatda{% endif %}{% if s['izoh'] %}<br>{{s['izoh']}}{% endif %}</small></div></div>{% endfor %}</div></section>
@@ -2489,7 +2636,8 @@ def public_track(token):
     <script>(function(){const el=document.getElementById('countdown'),deadline={{deadline_ms}},ready={{'true' if ready else 'false'}},wait={{countdown_wait|tojson}};function pad(n){return String(n).padStart(2,'0')}function tick(){if(!el)return;if(ready){el.textContent='Buyurtmangiz tayyor';el.className='countdown green';return}if(!deadline){el.textContent=wait||'Muddat belgilanmagan';el.className='countdown yellow';return}const diff=deadline-Date.now(),abs=Math.abs(diff),days=Math.floor(abs/86400000),hours=Math.floor(abs%86400000/3600000),mins=Math.floor(abs%3600000/60000),secs=Math.floor(abs%60000/1000),value=`${days} kun ${pad(hours)}:${pad(mins)}:${pad(secs)}`;if(diff<0){el.textContent=value+' kechikdi';el.className='countdown red'}else if(diff<86400000){el.textContent=value+' qoldi';el.className='countdown orange'}else if(diff<3*86400000){el.textContent=value+' qoldi';el.className='countdown yellow'}else{el.textContent=value+' qoldi';el.className='countdown green'}}tick();setInterval(tick,1000)})();</script></body></html>"""
     return render_template_string(html,o=order,stages=stages,pct=pct,current_stage=current_stage,
         ready=ready,deadline_ms=deadline_ms,deadline_text=deadline_text,total=total,paid=paid,
-        remaining=remaining,money=_money,delivery=delivery,media=media,approvals=approvals,
+        remaining=remaining,money=_money,format_money=_currency_money,currency=currency,
+        delivery=delivery,media=media,approvals=approvals,
         timeline=timeline,contact=contact,whatsapp=whatsapp,rang_css=rang_css,
         workflow_started=workflow_started,countdown_wait=countdown_wait,
         message=request.args.get("xabar",""))
@@ -2550,9 +2698,25 @@ def order_receipt_pdf(oid):
     out=io.BytesIO(); p=canvas.Canvas(out,pagesize=A4); w,h=A4
     p.setFont('Helvetica-Bold',20); p.drawCentredString(w/2,h-60,'Mebel360° - TOLOV CHEKI')
     p.setFont('Helvetica',12); y=h-110
-    paid=float(order['oldindan_tolov'] or 0); remaining=float(order['umumiy_narx'] or 0)-paid
-    for line in [f"Buyurtma: {order['kod']}",f"Mijoz: {order['mijoz']}",f"Mahsulot: {order['mahsulot']}",f"Umumiy summa: {order['umumiy_narx']:,.0f} so'm",f"Jami to'langan: {paid:,.0f} so'm",f"Qoldiq: {remaining:,.0f} so'm",f"Chek sanasi: {_tashkent_today()}"]:
-        p.drawString(70,y,line); y-=25
+    currency=_currency_code(order['valyuta'] if 'valyuta' in order.keys() else 'UZS')
+    paid=float(order['oldindan_tolov'] or 0); remaining=max(0,float(order['umumiy_narx'] or 0)-paid)
+    lines=[f"Buyurtma: {order['kod']}",f"Mijoz: {order['mijoz']}",f"Mahsulot: {order['mahsulot']}",
+           f"Kelishuv valyutasi: {currency}",f"Umumiy summa: {_currency_money(order['umumiy_narx'],currency)}",
+           f"Jami to'langan: {_currency_money(paid,currency)}",f"Qoldiq: {_currency_money(remaining,currency)}",
+           f"Kurs tartibi: {order['kurs_tartibi'] if 'kurs_tartibi' in order.keys() else 'Tolov kunidagi kurs'}",
+           f"Chek sanasi: {_tashkent_today()}"]
+    for line in lines:
+        ascii_line=(str(line).replace("‘","'").replace("’","'").replace("–","-").replace("—","-"))
+        p.drawString(70,y,ascii_line); y-=25
+    if pays:
+        p.setFont('Helvetica-Bold',11); p.drawString(70,y-5,"Oxirgi to'lovlar:"); y-=25
+        p.setFont('Helvetica',9)
+        for pay in pays[-6:]:
+            pc=_currency_code(pay['tolov_valyutasi'] if 'tolov_valyutasi' in pay.keys() else currency)
+            received=pay['qabul_qilingan_summa'] if 'qabul_qilingan_summa' in pay.keys() and pay['qabul_qilingan_summa'] else pay['miqdor']
+            line=f"{pay['sana']}: {_currency_money(received,pc)}"
+            if float(pay['kurs'] or 0)>1: line+=f" | 1 USD={_money(pay['kurs'])} UZS"
+            p.drawString(70,y,line.replace("‘","'").replace("’","'")); y-=17
     p.drawString(70,y-20,'Rahmat! Mebel360° xizmatidan foydalanganingiz uchun.')
     p.save(); out.seek(0); return send_file(out,mimetype='application/pdf',as_attachment=True,download_name=f"chek_{order['kod']}.pdf")
 
@@ -3211,14 +3375,21 @@ def manager_dashboard():
                     raise ValueError('Buyurtma kodi va mijoz ismi majburiy.')
                 order_type=request.form.get('buyurtma_turi') or 'To‘liq mebel'
                 payment_condition=request.form.get('tolov_sharti') or 'Avans majburiy'
-                initial_payment=float(request.form.get('oldindan_tolov') or 0)
+                order_currency=_currency_code(request.form.get('valyuta') or 'UZS')
+                initial_received=float(request.form.get('oldindan_tolov') or 0)
+                initial_currency=_currency_code(request.form.get('boshlangich_tolov_valyutasi') or order_currency)
+                initial_rate=float(request.form.get('boshlangich_kurs') or 0)
+                initial_payment=0.0
+                initial_uzs=0.0
+                if initial_received>0:
+                    initial_payment,initial_uzs,initial_rate=_payment_conversion(order_currency,initial_currency,initial_received,initial_rate)
                 cur = c.execute('''INSERT INTO buyurtmalar(
                     kod,mijoz,telefon,manzil,mahsulot,umumiy_narx,oldindan_tolov,
                     boshlanish_sana,tugash_sana,taxminiy_sana,taxminiy_vaqt,holat,izoh,
                     tracking_token,masul_xodim,material,rang,buyurtma_turi,tolov_sharti,
                     avans_talab,avans_muddat_sana,taklif_amal_sana,ishlab_chiqarish_kun,
-                    muddat_tartibi,rasmiy_muddat_vaqt)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                    muddat_tartibi,rasmiy_muddat_vaqt,valyuta,kurs_tartibi,oxirgi_kurs)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                     (code, customer, request.form.get('telefon',''), request.form.get('manzil',''),
                      request.form.get('mahsulot',''), float(request.form.get('umumiy_narx') or 0),
                      initial_payment, request.form.get('boshlanish_sana',''),
@@ -3228,8 +3399,12 @@ def manager_dashboard():
                      request.form.get('material',''), request.form.get('rang',''), order_type,payment_condition,
                      float(request.form.get('avans_talab') or 0),request.form.get('avans_muddat_sana',''),
                      request.form.get('taklif_amal_sana',''),int(request.form.get('ishlab_chiqarish_kun') or 0),
-                     'Tasdiqdan keyin',_safe_time(request.form.get('taxminiy_vaqt'))))
+                     'Tasdiqdan keyin',_safe_time(request.form.get('taxminiy_vaqt')),order_currency,'To‘lov kunidagi kurs',initial_rate if initial_rate>1 else 0))
                 order_id = cur.lastrowid
+                if initial_received>0:
+                    c.execute('''INSERT INTO buyurtma_tolovlari
+                        (buyurtma_id,sana,miqdor,turi,izoh,tolov_valyutasi,kurs,qabul_qilingan_summa,buyurtma_summa,uzs_ekvivalent)
+                        VALUES(?,?,?,?,?,?,?,?,?,?)''',(order_id,_tashkent_today(),initial_payment,'Avans','Menejer buyurtma yaratganda kiritdi',initial_currency,initial_rate,initial_received,initial_payment,initial_uzs))
                 workflow=_workflow_stages(order_type,payment_condition,request.form.get('maxsus_bosqichlar',''))
                 c.executemany('INSERT INTO buyurtma_bosqichlari(buyurtma_id,bosqich) VALUES(?,?)',
                               [(order_id, stage) for stage in workflow])
@@ -3250,13 +3425,14 @@ def manager_dashboard():
                 flash('✅ Yangi buyurtma saqlandi.')
             elif action == 'payment':
                 order_id = int(request.form['buyurtma_id'])
-                amount = float(request.form.get('miqdor') or 0)
-                if amount <= 0:
-                    raise ValueError('To‘lov summasi 0 dan katta bo‘lsin.')
-                c.execute('INSERT INTO buyurtma_tolovlari(buyurtma_id,sana,miqdor,turi,izoh) VALUES(?,?,?,?,?)',
-                          (order_id, request.form.get('sana') or _tashkent_now().date().isoformat(),
-                           amount, request.form.get('turi','To‘lov'), request.form.get('izoh','')))
-                c.execute('UPDATE buyurtmalar SET oldindan_tolov=oldindan_tolov+? WHERE id=?', (amount, order_id))
+                order_row=c.execute('SELECT * FROM buyurtmalar WHERE id=?',(order_id,)).fetchone()
+                received=float(request.form.get('miqdor') or 0)
+                payment_currency=_currency_code(request.form.get('tolov_valyutasi') or order_row['valyuta'] or 'UZS')
+                amount,uzs_equivalent,rate=_payment_conversion(order_row['valyuta'],payment_currency,received,float(request.form.get('kurs') or 0))
+                c.execute('''INSERT INTO buyurtma_tolovlari
+                    (buyurtma_id,sana,miqdor,turi,izoh,tolov_valyutasi,kurs,qabul_qilingan_summa,buyurtma_summa,uzs_ekvivalent)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)''',(order_id,request.form.get('sana') or _tashkent_today(),amount,request.form.get('turi','To‘lov'),request.form.get('izoh',''),payment_currency,rate,received,amount,uzs_equivalent))
+                c.execute('UPDATE buyurtmalar SET oldindan_tolov=oldindan_tolov+?,oxirgi_kurs=CASE WHEN ?>1 THEN ? ELSE oxirgi_kurs END WHERE id=?', (amount,rate,rate,order_id))
                 updated=c.execute('SELECT * FROM buyurtmalar WHERE id=?',(order_id,)).fetchone()
                 if _payment_ready(updated):
                     condition=str(updated['tolov_sharti'] or 'Avans majburiy')
@@ -3291,8 +3467,8 @@ def manager_dashboard():
         GROUP BY b.id ORDER BY b.id DESC LIMIT 200''').fetchall()
     stats = c.execute('''SELECT COUNT(*) jami,
         SUM(CASE WHEN holat NOT IN ('Yetkazildi','Yopildi') THEN 1 ELSE 0 END) faol,
-        COALESCE(SUM(umumiy_narx),0) summa,
-        COALESCE(SUM(oldindan_tolov),0) tushum FROM buyurtmalar''').fetchone()
+        COALESCE(SUM(CASE WHEN valyuta='USD' AND oxirgi_kurs>0 THEN umumiy_narx*oxirgi_kurs WHEN valyuta='UZS' THEN umumiy_narx ELSE 0 END),0) summa,
+        COALESCE((SELECT SUM(uzs_ekvivalent) FROM buyurtma_tolovlari),0) tushum FROM buyurtmalar''').fetchone()
     c.close()
     return render_template_string(MANAGER_DASHBOARD_HTML, orders=orders, stats=stats,
                                   today=_tashkent_now().date().isoformat(), staff_name=session.get('staff_name','Menejer'))
@@ -3393,7 +3569,7 @@ STAFF_ADMIN_HTML = r"""
 
 MANAGER_DASHBOARD_HTML = r"""
 <!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Menejer kabineti</title>
-<style>*{box-sizing:border-box}body{margin:0;font-family:Arial;background:#eef3f8;color:#172033}.head{background:linear-gradient(135deg,#0f1b33,#2563eb);color:#fff;padding:18px}.wrap{max-width:1250px;margin:auto;padding:16px}.box,.card{background:#fff;border-radius:16px;padding:17px;box-shadow:0 8px 24px #0f172a18;margin-bottom:14px}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.card b{font-size:25px;color:#2563eb}.grid{display:grid;grid-template-columns:370px 1fr;gap:14px}input,select,textarea{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:9px;margin:5px 0 10px}button,.btn{border:0;border-radius:9px;padding:10px 13px;background:#2563eb;color:#fff;font-weight:800;text-decoration:none;cursor:pointer}.red{background:#dc2626}.green{background:#16a34a}table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px;border-bottom:1px solid #e5e7eb;text-align:left;vertical-align:top}.progress{height:8px;background:#e2e8f0;border-radius:10px;overflow:hidden;min-width:90px}.progress i{display:block;height:100%;background:#16a34a}.messages{padding:10px;border-radius:10px;background:#eff6ff;color:#1d4ed8;margin-bottom:12px}@media(max-width:900px){.grid{grid-template-columns:1fr}.cards{grid-template-columns:1fr 1fr}.table{overflow:auto}}@media(max-width:500px){.cards{grid-template-columns:1fr}}</style></head><body><div class="head"><div class="wrap" style="padding:0"><b>🧑‍💼 Menejer: {{staff_name}}</b><a class="btn red" style="float:right" href="/menejer/logout">Chiqish</a></div></div><div class="wrap">{% with messages=get_flashed_messages() %}{% if messages %}<div class="messages">{{messages[0]}}</div>{% endif %}{% endwith %}<div class="cards"><div class="card"><span>JAMI BUYURTMA</span><br><b>{{stats['jami'] or 0}}</b></div><div class="card"><span>FAOL</span><br><b>{{stats['faol'] or 0}}</b></div><div class="card"><span>JAMI SUMMA</span><br><b>{{'{:,.0f}'.format(stats['summa'] or 0)}}</b></div><div class="card"><span>TUSHUM</span><br><b>{{'{:,.0f}'.format(stats['tushum'] or 0)}}</b></div></div><div class="grid"><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="add_order"><h3>Yangi buyurtma</h3><label>Kod</label><input name="kod" placeholder="AB-001" required><label>Mijoz</label><input name="mijoz" required><label>Telefon</label><input name="telefon"><label>Manzil</label><input name="manzil"><label>Mahsulot</label><input name="mahsulot"><label>Buyurtma turi</label><select name="buyurtma_turi"><option>To‘liq mebel</option><option>Faqat oyna</option><option>MDF fasad</option><option>Ta’mirlash</option><option>Aralash buyurtma</option></select><label>Material</label><input name="material"><label>Rang</label><input name="rang"><label>Umumiy narx</label><input type="number" name="umumiy_narx" value="0"><label>Avans</label><input type="number" name="oldindan_tolov" value="0"><label>To‘lov sharti</label><select name="tolov_sharti"><option>Avans majburiy</option><option>Qisman avans</option><option>Avans talab qilinmaydi — ishonchli mijoz</option><option>Muddatli to‘lov</option><option>Shartnoma asosida to‘lov</option></select><label>Talab qilinadigan avans</label><input type="number" name="avans_talab" value="0"><label>Avans muddati</label><input type="date" name="avans_muddat_sana"><label>Narx taklifi amal qilish sanasi</label><input type="date" name="taklif_amal_sana"><label>Ishlab chiqarish muddati (kun)</label><input type="number" name="ishlab_chiqarish_kun" value="0"><label>Boshlanish</label><input type="date" name="boshlanish_sana" value="{{today}}"><label>Tugash</label><input type="date" name="tugash_sana"><label>Taxminiy tayyor</label><input type="date" name="taxminiy_sana"><label>Taxminiy soat</label><input type="time" name="taxminiy_vaqt" value="18:00"><label>Izoh</label><textarea name="izoh"></textarea><button>Buyurtmani saqlash</button></form><div class="box table"><h3>Buyurtmalar</h3><table><tr><th>Kod / mijoz</th><th>Mahsulot</th><th>Summa / qoldiq</th><th>Jarayon</th><th>Holat</th><th>To‘lov</th></tr>{% for o in orders %}<tr><td><b>{{o['kod']}}</b><br>{{o['mijoz']}}<br><small>{{o['telefon']}}</small></td><td>{{o['mahsulot'] or '-'}}<br><small>{{o['material'] or ''}} {{o['rang'] or ''}}</small></td><td>{{'{:,.0f}'.format(o['umumiy_narx'] or 0)}}<br><b style="color:#dc2626">Qoldiq: {{'{:,.0f}'.format(o['qoldiq'] or 0)}}</b></td><td><div class="progress"><i style="width:{{o['progress']}}%"></i></div><small>{{o['progress']}}%</small></td><td><form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="status"><input type="hidden" name="buyurtma_id" value="{{o['id']}}"><select name="holat"><option selected>{{o['holat']}}</option><option>Yangi</option><option>Jarayonda</option><option>Tayyor</option><option>Yetkazishga tayyor</option><option>Yetkazildi</option><option>Yopildi</option></select><button class="green">Yangilash</button></form></td><td><form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="payment"><input type="hidden" name="buyurtma_id" value="{{o['id']}}"><input type="date" name="sana" value="{{today}}"><input type="number" name="miqdor" placeholder="Summa" required><input name="izoh" placeholder="Izoh"><button>Qo‘shish</button></form></td></tr>{% else %}<tr><td colspan="6">Buyurtma yo‘q.</td></tr>{% endfor %}</table></div></div></div></body></html>
+<style>*{box-sizing:border-box}body{margin:0;font-family:Arial;background:#eef3f8;color:#172033}.head{background:linear-gradient(135deg,#0f1b33,#2563eb);color:#fff;padding:18px}.wrap{max-width:1250px;margin:auto;padding:16px}.box,.card{background:#fff;border-radius:16px;padding:17px;box-shadow:0 8px 24px #0f172a18;margin-bottom:14px}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.card b{font-size:25px;color:#2563eb}.grid{display:grid;grid-template-columns:370px 1fr;gap:14px}input,select,textarea{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:9px;margin:5px 0 10px}button,.btn{border:0;border-radius:9px;padding:10px 13px;background:#2563eb;color:#fff;font-weight:800;text-decoration:none;cursor:pointer}.red{background:#dc2626}.green{background:#16a34a}table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px;border-bottom:1px solid #e5e7eb;text-align:left;vertical-align:top}.progress{height:8px;background:#e2e8f0;border-radius:10px;overflow:hidden;min-width:90px}.progress i{display:block;height:100%;background:#16a34a}.messages{padding:10px;border-radius:10px;background:#eff6ff;color:#1d4ed8;margin-bottom:12px}@media(max-width:900px){.grid{grid-template-columns:1fr}.cards{grid-template-columns:1fr 1fr}.table{overflow:auto}}@media(max-width:500px){.cards{grid-template-columns:1fr}}</style></head><body><div class="head"><div class="wrap" style="padding:0"><b>🧑‍💼 Menejer: {{staff_name}}</b><a class="btn red" style="float:right" href="/menejer/logout">Chiqish</a></div></div><div class="wrap">{% with messages=get_flashed_messages() %}{% if messages %}<div class="messages">{{messages[0]}}</div>{% endif %}{% endwith %}<div class="cards"><div class="card"><span>JAMI BUYURTMA</span><br><b>{{stats['jami'] or 0}}</b></div><div class="card"><span>FAOL</span><br><b>{{stats['faol'] or 0}}</b></div><div class="card"><span>JAMI SUMMA (UZS)</span><br><b>{{'{:,.0f}'.format(stats['summa'] or 0)}}</b></div><div class="card"><span>TUSHUM (UZS)</span><br><b>{{'{:,.0f}'.format(stats['tushum'] or 0)}}</b></div></div><div class="grid"><form class="box" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="add_order"><h3>Yangi buyurtma</h3><label>Kod</label><input name="kod" placeholder="AB-001" required><label>Mijoz</label><input name="mijoz" required><label>Telefon</label><input name="telefon"><label>Manzil</label><input name="manzil"><label>Mahsulot</label><input name="mahsulot"><label>Buyurtma turi</label><select name="buyurtma_turi"><option>To‘liq mebel</option><option>Faqat oyna</option><option>MDF fasad</option><option>Ta’mirlash</option><option>Aralash buyurtma</option></select><label>Material</label><input name="material"><label>Rang</label><input name="rang"><label>Kelishuv valyutasi</label><select name="valyuta"><option value="UZS">UZS — so‘m</option><option value="USD">USD — AQSh dollari</option></select><label>Umumiy narx</label><input type="number" step="0.01" name="umumiy_narx" value="0"><label>Avans</label><input type="number" step="0.01" name="oldindan_tolov" value="0"><label>Avans valyutasi</label><select name="boshlangich_tolov_valyutasi"><option value="UZS">UZS</option><option value="USD">USD</option></select><label>To‘lov kunidagi 1 USD kursi</label><input type="number" step="0.01" name="boshlangich_kurs" value="0"><label>To‘lov sharti</label><select name="tolov_sharti"><option>Avans majburiy</option><option>Qisman avans</option><option>Avans talab qilinmaydi — ishonchli mijoz</option><option>Muddatli to‘lov</option><option>Shartnoma asosida to‘lov</option></select><label>Talab qilinadigan avans</label><input type="number" name="avans_talab" value="0"><label>Avans muddati</label><input type="date" name="avans_muddat_sana"><label>Narx taklifi amal qilish sanasi</label><input type="date" name="taklif_amal_sana"><label>Ishlab chiqarish muddati (kun)</label><input type="number" name="ishlab_chiqarish_kun" value="0"><label>Boshlanish</label><input type="date" name="boshlanish_sana" value="{{today}}"><label>Tugash</label><input type="date" name="tugash_sana"><label>Taxminiy tayyor</label><input type="date" name="taxminiy_sana"><label>Taxminiy soat</label><input type="time" name="taxminiy_vaqt" value="18:00"><label>Izoh</label><textarea name="izoh"></textarea><button>Buyurtmani saqlash</button></form><div class="box table"><h3>Buyurtmalar</h3><table><tr><th>Kod / mijoz</th><th>Mahsulot</th><th>Summa / qoldiq</th><th>Jarayon</th><th>Holat</th><th>To‘lov</th></tr>{% for o in orders %}<tr><td><b>{{o['kod']}}</b><br>{{o['mijoz']}}<br><small>{{o['telefon']}}</small></td><td>{{o['mahsulot'] or '-'}}<br><small>{{o['material'] or ''}} {{o['rang'] or ''}}</small></td><td>{% if o['valyuta']=='USD' %}${% endif %}{{'{:,.2f}'.format(o['umumiy_narx'] or 0)}} <small>{{o['valyuta'] or 'UZS'}}</small><br><b style="color:#dc2626">Qoldiq: {% if o['valyuta']=='USD' %}${% endif %}{{'{:,.2f}'.format(o['qoldiq'] or 0)}} {{o['valyuta'] or 'UZS'}}</b></td><td><div class="progress"><i style="width:{{o['progress']}}%"></i></div><small>{{o['progress']}}%</small></td><td><form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="status"><input type="hidden" name="buyurtma_id" value="{{o['id']}}"><select name="holat"><option selected>{{o['holat']}}</option><option>Yangi</option><option>Jarayonda</option><option>Tayyor</option><option>Yetkazishga tayyor</option><option>Yetkazildi</option><option>Yopildi</option></select><button class="green">Yangilash</button></form></td><td><form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="payment"><input type="hidden" name="buyurtma_id" value="{{o['id']}}"><input type="date" name="sana" value="{{today}}"><input type="number" step="0.01" name="miqdor" placeholder="Qabul qilingan summa" required><select name="tolov_valyutasi"><option value="UZS">UZS</option><option value="USD">USD</option></select><input type="number" step="0.01" name="kurs" placeholder="1 USD kursi"><input name="izoh" placeholder="Izoh"><button>Qo‘shish</button></form></td></tr>{% else %}<tr><td colspan="6">Buyurtma yo‘q.</td></tr>{% endfor %}</table></div></div></div></body></html>
 """
 
 CONSTRUCTOR_DASHBOARD_HTML = r"""
@@ -3671,28 +3847,20 @@ HTML = r"""
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mebel360°</title>
 <style>
-:root{--nav:#0f1b33;--blue:#2563eb;--bg:#eef3f8;--card:#fff;--text:#182235;--muted:#64748b;--danger:#dc2626;--ok:#16a34a}
-*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:var(--bg);color:var(--text)}
-header{background:linear-gradient(135deg,#0f1b33,#1d4ed8);color:#fff;padding:20px;position:sticky;top:0;z-index:5}
-.top{max-width:1400px;margin:auto;display:grid;grid-template-columns:auto auto 1fr;align-items:center;gap:16px}
-.brand{display:flex;align-items:center;gap:12px;min-width:310px}.brand-logo{width:105px;height:66px;object-fit:contain;background:#fff;border-radius:12px;padding:4px;box-shadow:0 5px 16px #0003}.brand-text h1{margin:0;font-size:27px}.sub{opacity:.88;font-size:13px;margin-top:3px}.live-clock{min-width:155px;text-align:center;background:#ffffff18;border:1px solid #ffffff35;border-radius:14px;padding:8px 13px;box-shadow:0 6px 18px #0002}.live-clock-time{font-size:25px;font-weight:900;letter-spacing:2px;line-height:1.1}.live-clock-date{font-size:11px;opacity:.92;margin-top:4px;white-space:nowrap}.header-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px}.header-actions a{display:inline-flex;text-decoration:none}.header-actions button{white-space:nowrap}h1{margin:0;font-size:27px}.wrap{max-width:1400px;margin:auto;padding:16px}
-.cards{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:15px}
-.card,.panel{background:var(--card);border-radius:14px;box-shadow:0 7px 20px #0f172a12;padding:14px}
-.card span{font-size:11px;color:var(--muted);font-weight:700}.card b{display:block;font-size:25px;color:var(--blue);margin-top:5px}
-.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:13px}
-button{border:0;border-radius:9px;padding:9px 13px;background:var(--blue);color:#fff;font-weight:700;cursor:pointer}
-button:hover{filter:brightness(.94)}.tabs button{background:#dbe5f4;color:#24334d}.tabs button.active{background:var(--nav);color:#fff}
-.tab{display:none}.tab.active{display:block}.grid{display:grid;grid-template-columns:360px 1fr;gap:14px}
-h3{margin:0 0 11px}label{display:block;font-size:12px;font-weight:700;margin-top:8px;color:#334155}
-input,select,textarea{width:100%;margin-top:4px;padding:9px;border:1px solid #cbd5e1;border-radius:8px;background:#fff}
-textarea{min-height:65px}form button{width:100%;margin-top:12px}table{width:100%;border-collapse:collapse;font-size:12px}
-th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:nowrap}th{background:#f8fafc;color:#475569}
-.tablewrap{overflow:auto;max-height:590px}.danger{background:var(--danger);padding:6px 9px}.ok{background:var(--ok)}
-.msg{min-height:18px;margin-top:7px;font-size:12px;color:#166534}.badge{padding:3px 7px;border-radius:20px;background:#e0e7ff;color:#3730a3;font-size:11px}
-.money{font-weight:700;color:#166534}.minus{font-weight:700;color:#b91c1c}.balance{font-weight:800;color:#1d4ed8}
-.stage{display:flex;align-items:center;gap:6px;padding:6px 0}.stage input{width:auto;margin:0}.low{background:#fee2e2!important}
-@media(max-width:1150px){.top{grid-template-columns:1fr auto}.header-actions{grid-column:1/-1;justify-content:flex-start}.cards{grid-template-columns:repeat(3,1fr)}.grid{grid-template-columns:1fr}}
-@media(max-width:600px){.top{display:flex;flex-direction:column;align-items:stretch}.brand{min-width:0}.brand-logo{width:88px;height:58px}.brand-text h1{font-size:22px}.live-clock{width:100%}.header-actions{justify-content:flex-start}.cards{grid-template-columns:repeat(2,1fr)}header{position:static;padding:13px}.wrap{padding:9px}}
+:root{--nav:#18213f;--blue:#315bd8;--purple:#6d4aff;--bg:#f4f6fb;--card:#fff;--text:#172039;--muted:#68728a;--danger:#e33d61;--ok:#19a66a;--line:#e6e9f2;--soft:#f7f8fc}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text)}
+header{background:linear-gradient(118deg,#232e7a 0%,#4248b8 48%,#7452d7 100%);color:#fff;padding:18px 22px 20px;box-shadow:0 12px 34px rgba(40,48,118,.24)}
+.top{max-width:1680px;margin:auto;display:grid;grid-template-columns:minmax(310px,1fr) auto minmax(590px,1.5fr);align-items:center;gap:18px}
+.brand{display:flex;align-items:center;gap:13px;min-width:0}.brand-logo{width:92px;height:64px;object-fit:contain;background:#fff;border-radius:17px;padding:5px;box-shadow:0 8px 24px rgba(10,18,64,.26)}.brand-text h1{margin:0;font-size:29px;letter-spacing:-.6px}.sub{opacity:.88;font-size:13px;margin-top:4px;line-height:1.35}.live-clock{min-width:190px;text-align:center;background:rgba(255,255,255,.13);border:1px solid rgba(255,255,255,.22);border-radius:17px;padding:10px 15px;backdrop-filter:blur(8px)}.live-clock-time{font-size:28px;font-weight:900;letter-spacing:2.2px;line-height:1.05;font-variant-numeric:tabular-nums}.live-clock-date{font-size:11px;opacity:.92;margin-top:5px;white-space:nowrap}.header-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:7px}.header-actions a{display:inline-flex;text-decoration:none}.header-actions button{white-space:nowrap;background:rgba(16,24,64,.55)!important;border:1px solid rgba(255,255,255,.16);box-shadow:none;padding:8px 11px;font-size:12px}.header-actions a:nth-last-child(2) button{background:#19a66a!important}.header-actions a:last-child button{background:#e33d61!important}
+.wrap{max-width:1680px;margin:auto;padding:18px 22px 34px}.cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-bottom:16px}.card,.panel{background:var(--card);border:1px solid rgba(225,228,239,.85);border-radius:18px;box-shadow:0 8px 24px rgba(33,43,84,.075);padding:16px}.card{position:relative;overflow:hidden;min-height:90px;padding-left:68px;display:flex;flex-direction:column;justify-content:center}.card:before{content:"";position:absolute;left:16px;top:22px;width:38px;height:38px;border-radius:12px;background:#eaf0ff}.card:nth-child(2):before{background:#e8f8f1}.card:nth-child(3):before{background:#f1eaff}.card:nth-child(4):before{background:#fff1e5}.card:nth-child(5):before{background:#e6f8fb}.card:nth-child(6):before{background:#ffe9ee}.card span{font-size:10px;color:var(--muted);font-weight:900;letter-spacing:.35px}.card b{display:block;font-size:27px;color:var(--blue);margin-top:5px}.card:nth-child(2) b{color:#14915c}.card:nth-child(3) b{color:#7047e8}.card:nth-child(4) b{color:#df7a20}.card:nth-child(5) b{color:#1497ad}.card:nth-child(6) b{color:#dc3156}
+.tabs{display:flex;gap:5px;overflow-x:auto;flex-wrap:nowrap;margin-bottom:15px;padding:8px;background:#fff;border:1px solid var(--line);border-radius:15px;box-shadow:0 5px 18px rgba(33,43,84,.055);scrollbar-width:thin}.tabs button{flex:0 0 auto;background:transparent;color:#59637a;padding:9px 12px;border-radius:10px;font-size:12px}.tabs button.active{background:linear-gradient(135deg,#315bd8,#684ce2);color:#fff;box-shadow:0 5px 14px rgba(67,77,194,.24)}
+button{border:0;border-radius:10px;padding:9px 13px;background:var(--blue);color:#fff;font-weight:800;cursor:pointer;transition:.18s ease}button:hover{transform:translateY(-1px);filter:brightness(.97)}button:disabled{opacity:.55;cursor:not-allowed;transform:none}.tab{display:none}.tab.active{display:block}.grid{display:grid;grid-template-columns:380px minmax(0,1fr);gap:15px}#orders .grid{grid-template-columns:410px minmax(0,1fr)}
+h3{margin:0 0 13px;font-size:17px;letter-spacing:-.2px}label{display:block;font-size:12px;font-weight:800;margin-top:9px;color:#3f4961}input,select,textarea{width:100%;margin-top:5px;padding:10px 11px;border:1px solid #d9deea;border-radius:10px;background:#fff;color:#172039;outline:none;transition:.16s}input:focus,select:focus,textarea:focus{border-color:#6b72e8;box-shadow:0 0 0 3px rgba(91,97,219,.12)}textarea{min-height:70px;resize:vertical}form>button{width:100%;margin-top:13px}.form-section{padding:13px;border:1px solid #e9ebf3;border-radius:14px;background:#fafbfe;margin-top:10px}.form-section:first-of-type{margin-top:0}.form-section-title{display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:900;color:#39445d;margin-bottom:5px}.form-row{display:grid;grid-template-columns:1fr 1fr;gap:9px}.hint{font-size:11px;color:var(--muted);line-height:1.45;margin-top:6px}.currency-note{padding:10px 11px;border-radius:11px;background:#eef3ff;color:#2f4da7;font-size:11px;font-weight:700;line-height:1.45;margin-top:9px}details.advanced{border:1px solid #e4e7f0;border-radius:13px;padding:10px 12px;margin-top:10px;background:#fff}details.advanced summary{cursor:pointer;font-weight:900;font-size:12px;color:#42506d}.danger{background:var(--danger);padding:7px 10px}.ok{background:var(--ok)}.secondary{background:#eef1f8;color:#34415d}.violet{background:#6b4ce6}.outline{background:#fff;color:#3454b4;border:1px solid #cad4f4}.outline.red{color:#d43d58;border-color:#f0c5cd}.outline.green{color:#14895a;border-color:#b9e4d1}
+.msg{min-height:18px;margin-top:8px;font-size:12px;color:#15803d}.badge{display:inline-flex;align-items:center;padding:5px 9px;border-radius:999px;background:#e9edff;color:#4a45ad;font-size:10px;font-weight:900}.badge.new{background:#eef2ff;color:#4f46e5}.badge.progressing{background:#fff4df;color:#b36a08}.badge.ready{background:#e8f8f0;color:#168358}.badge.done{background:#e9f8f5;color:#087c68}.badge.waiting{background:#fff0f2;color:#bd3650}.money{font-weight:800;color:#168358}.minus{font-weight:800;color:#be334f}.balance{font-weight:900;color:#d23f59}.stage{display:flex;align-items:center;gap:7px;padding:7px 0}.stage input{width:auto;margin:0}.low{background:#fff0f2!important}
+.tablewrap{overflow:auto;max-height:680px;padding:0}.table-head{position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:15px 16px 12px;background:#fff;border-bottom:1px solid var(--line)}.table-tools{display:flex;gap:7px;align-items:center}.table-tools input,.table-tools select{width:auto;margin:0;padding:8px 10px;font-size:11px}.table-tools input{min-width:210px}table{width:100%;border-collapse:separate;border-spacing:0;font-size:11px}th,td{padding:11px 10px;border-bottom:1px solid #eceef4;text-align:left;vertical-align:middle;white-space:nowrap}th{position:sticky;top:64px;z-index:1;background:#f8f9fc;color:#626c82;font-size:10px;text-transform:uppercase;letter-spacing:.35px}tbody tr:hover{background:#fafbfe}.order-code{font-size:13px;font-weight:900;color:#23345f}.order-sub{display:block;color:var(--muted);font-size:10px;margin-top:3px}.progress-track{height:7px;min-width:115px;background:#e7eaf2;border-radius:999px;overflow:hidden;margin-bottom:5px}.progress-fill{height:100%;background:linear-gradient(90deg,#5d55e9,#8456e6);border-radius:999px}.action-group{display:flex;gap:5px;flex-wrap:wrap;max-width:210px}.action-group button{padding:6px 8px;font-size:10px;border-radius:8px}.doc-group{display:flex;gap:4px;flex-wrap:wrap;min-width:195px}.doc-group button{padding:6px 7px;font-size:9px;border-radius:7px}.price-main{font-weight:900;font-size:12px}.price-sub{display:block;color:var(--muted);font-size:9px;margin-top:3px}.empty-row{text-align:center!important;color:var(--muted);padding:30px!important}
+.modal-shell{display:none;position:fixed;inset:0;background:rgba(17,24,54,.64);z-index:30;place-items:center;padding:14px;backdrop-filter:blur(4px)}.modal-card{width:min(580px,97vw);max-height:94vh;overflow:auto;background:#fff;border-radius:20px;padding:18px;box-shadow:0 30px 80px rgba(8,13,42,.35)}.modal-title{display:flex;align-items:center;justify-content:space-between;gap:12px}.modal-title h3{margin:0}.payment-preview{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:12px}.payment-preview div{padding:12px;border-radius:12px;background:#f5f7fc}.payment-preview small{display:block;color:var(--muted);font-size:10px;margin-bottom:4px}.payment-preview b{font-size:14px}.close-btn{width:auto!important;margin:0!important;background:#edf0f7;color:#34415d}
+@media(max-width:1320px){.top{grid-template-columns:1fr auto}.header-actions{grid-column:1/-1;justify-content:flex-start}.cards{grid-template-columns:repeat(3,1fr)}.grid,#orders .grid{grid-template-columns:1fr}.tablewrap{max-height:none}}
+@media(max-width:720px){header{padding:14px}.top{display:flex;flex-direction:column;align-items:stretch}.brand-logo{width:80px;height:58px}.brand-text h1{font-size:23px}.live-clock{width:100%}.header-actions{justify-content:flex-start}.wrap{padding:11px}.cards{grid-template-columns:repeat(2,1fr)}.card{padding-left:58px}.card:before{left:12px}.form-row{grid-template-columns:1fr}.table-head{align-items:stretch;flex-direction:column}.table-tools{width:100%;display:grid;grid-template-columns:1fr}.table-tools input,.table-tools select{width:100%;min-width:0}th{top:111px}.payment-preview{grid-template-columns:1fr}.modal-card{padding:14px}}
 </style>
 </head>
 <body>
@@ -3701,7 +3869,7 @@ th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:no
   <img class="brand-logo" src="/static/mebel360-logo.png?v=20260722" alt="Mebel360° logosi">
   <div class="brand-text">
     <h1>Mebel360°</h1>
-    <div class="sub">Ishchilar, buyurtmalar, ombor, ishlab chiqarish va moliya</div>
+    <div class="sub">Ishchilar, buyurtmalar, ombor, ishlab chiqarish va moliyani yagona tizimda boshqaring</div>
   </div>
 </div>
 <div class="live-clock">
@@ -3729,10 +3897,10 @@ th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:no
 </div>
 
 <div class="tabs">
- <button class="active" data-tab="workers">Ishchilar</button>
+ <button data-tab="workers">Ishchilar</button>
  <button data-tab="attendance">Keldi-ketdi</button>
  <button data-tab="results">Ish natijasi</button>
- <button data-tab="orders">Buyurtmalar</button>
+ <button class="active" data-tab="orders">Buyurtmalar</button>
  <button data-tab="stock">Ombor</button>
  <button data-tab="trips">Shofyor</button>
  <button data-tab="payments">To‘lov</button>
@@ -3747,7 +3915,7 @@ th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:no
  <button data-tab="delivery">Yetkazish</button>
 </div>
 
-<section id="workers" class="tab active"><div class="grid">
+<section id="workers" class="tab"><div class="grid">
 <div class="panel"><h3>Yangi ishchi</h3><form id="workerForm">
 <label>Ism<input name="ism" required></label><label>Familiya<input name="familiya"></label>
 <label>Telefon<input name="telefon"></label><label>Lavozim<input name="lavozim"></label>
@@ -3790,62 +3958,53 @@ th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:no
 <label>Buyurtma kodi<input name="buyurtma_kodi"></label><label>Izoh<textarea name="izoh"></textarea></label>
 <button>Saqlash</button><div class="msg"></div></form></div><div class="panel tablewrap"><table><thead><tr><th>Ishchi</th><th>Ish turi</th><th>Sana</th><th>Miqdor</th><th>Haq</th><th>Buyurtma</th></tr></thead><tbody id="resultsBody"></tbody></table></div></div></section>
 
-<section id="orders" class="tab"><div class="grid"><div class="panel"><h3>Yangi buyurtma</h3><form id="orderForm">
-<label>Kod<input name="kod" required placeholder="AB-001"></label><label>Mijoz<input name="mijoz" required></label><label>Telefon<input name="telefon"></label>
-<label>Manzil<input name="manzil"></label>
-<label>Pasport/ID<input name="pasport_id"></label>
-<label>Mahsulot<input name="mahsulot"></label>
+<section id="orders" class="tab active"><div class="grid">
+<div class="panel"><h3>➕ Yangi buyurtma</h3><form id="orderForm">
+<div class="form-section"><div class="form-section-title"><span>1. Mijoz va buyurtma</span></div>
+<div class="form-row"><label>Kod<input name="kod" required placeholder="AB-001"></label><label>Mijoz<input name="mijoz" required placeholder="Mijoz ismi"></label></div>
+<div class="form-row"><label>Telefon<input name="telefon" placeholder="+998 90 123 45 67"></label><label>Pasport/ID<input name="pasport_id"></label></div>
+<label>Manzil<input name="manzil" placeholder="Yetkazish manzili"></label><label>Mahsulot<input name="mahsulot" placeholder="Masalan: dorixona vitrinalari"></label>
 <label>Buyurtma turi<select name="buyurtma_turi" id="orderTypeSelect"><option>To‘liq mebel</option><option>Faqat oyna</option><option>MDF fasad</option><option>Ta’mirlash</option><option>Aralash buyurtma</option><option>Maxsus</option></select></label>
-<label id="customStagesLabel" style="display:none">Maxsus bosqichlar<textarea name="maxsus_bosqichlar" placeholder="O‘lchov → Chizma → Ishlov → Sifat nazorati → Yakunlandi"></textarea></label>
-<label>O‘lcham<input name="olcham" placeholder="2000x600x2400 mm"></label>
-<label>Soni<input type="number" name="soni" value="1" min="1"></label>
-<label>Material<input name="material" placeholder="MDF / LDSP / Akril"></label>
-<label>Rang<input name="rang" placeholder="Oq marmar / Yashil"></label>
-<label>Rang kodi<input name="rang_kodi" placeholder="RAL 6018 yoki #22aa66"></label>
-<label>Yaltiroqlik<select name="yaltiroqlik"><option></option><option>Mat</option><option>Yarim mat</option><option>Yaltiroq</option></select></label>
-<label>Umumiy narx<input type="number" name="umumiy_narx" value="0"></label>
-<label>Avans<input type="number" name="oldindan_tolov" value="0"></label>
+<label id="customStagesLabel" style="display:none">Maxsus bosqichlar<textarea name="maxsus_bosqichlar" placeholder="O‘lchov → Chizma → Ishlov → Sifat nazorati → Yakunlandi"></textarea></label></div>
+
+<div class="form-section"><div class="form-section-title"><span>2. Narx va valyuta</span><span>UZS / USD</span></div>
+<div class="form-row"><label>Kelishuv valyutasi<select name="valyuta" id="orderCurrency"><option value="UZS">UZS — so‘m</option><option value="USD">USD — AQSh dollari</option></select></label><label>Umumiy narx<input type="number" step="0.01" name="umumiy_narx" value="0" min="0"></label></div>
+<div class="currency-note" id="currencyRuleNote">Hisob-kitob so‘mda yuritiladi.</div>
+<div class="form-row"><label>Boshlang‘ich avans<input type="number" step="0.01" name="oldindan_tolov" value="0" min="0"></label><label>Avans qabul qilingan valyuta<select name="boshlangich_tolov_valyutasi" id="initialPaymentCurrency"><option value="UZS">UZS — so‘m</option><option value="USD">USD — dollar</option></select></label></div>
+<div class="form-row" id="initialRateRow" style="display:none"><label>1 USD kursi<input type="number" step="0.01" name="boshlangich_kurs" id="initialRate" min="0" placeholder="Masalan: 12900"></label><label>Avans sanasi<input type="date" name="boshlangich_tolov_sana"></label></div>
 <label>To‘lov sharti<select name="tolov_sharti" id="paymentConditionSelect"><option>Avans majburiy</option><option>Qisman avans</option><option>Avans talab qilinmaydi — ishonchli mijoz</option><option>Muddatli to‘lov</option><option>Shartnoma asosida to‘lov</option></select></label>
-<label>Talab qilinadigan avans summasi<input type="number" name="avans_talab" value="0" placeholder="Masalan: 4800000"></label>
-<label>Avansni to‘lash muddati<input type="date" name="avans_muddat_sana"></label>
-<label>Narx taklifi amal qilish sanasi<input type="date" name="taklif_amal_sana"></label>
-<label>Ishlab chiqarish muddati (kun)<input type="number" name="ishlab_chiqarish_kun" value="0" min="0" placeholder="Avans/tasdiqdan keyin"></label>
-<label>Chizma versiyasi<input type="number" name="chizma_versiya" value="1" min="1"></label>
-<label>Bepul o‘zgartirish limiti<input type="number" name="bepul_ozgarish_limit" value="2" min="0"></label>
-<label>Oraliq to‘lov<input type="number" name="oraliq_tolov" value="0"></label>
-<label>To‘lov usuli<select name="tolov_usuli"><option>Naqd</option><option>Click</option><option>Payme</option><option>Bank orqali</option><option>Plastik karta</option><option>Qarz</option></select></label>
-<label>Yetkazish<select name="yetkazish"><option>Kiritilgan</option><option>Kiritilmagan</option><option>Alohida haq</option></select></label>
-<label>Montaj<select name="montaj"><option>Kiritilgan</option><option>Kiritilmagan</option><option>Alohida haq</option></select></label>
-<label>Kafolat muddati<input name="kafolat_muddati" value="12 oy"></label>
-<label>Boshlanish sana<input type="date" name="boshlanish_sana"></label>
-<label>Tugash sana<input type="date" name="tugash_sana"></label>
-<label>Taxminiy tayyor sana<input type="date" name="taxminiy_sana"></label>
-<label>Taxminiy tayyor soat<input type="time" name="taxminiy_vaqt" value="18:00"></label>
-<label>Mas’ul xodim<input name="masul_xodim"></label>
-<label>Mijozga aloqa telefoni<input name="aloqa_telefon" placeholder="+998 90 123 45 67"></label>
-<label>Mijozga ko‘rinadigan izoh<textarea name="mijozga_izoh" placeholder="Ish jarayoni yoki muhim ma’lumot"></textarea></label>
-<label>Muddat o‘zgarishi / kechikish sababi<textarea name="kechikish_sababi" placeholder="Material 1 kun kechikdi..."></textarea></label>
-<label>Rasm/video havolasi<input name="media_havola" placeholder="https://..."></label>
-<label>Media turi<select name="media_turi"><option>Rasm</option><option>Video</option><option>Fayl</option></select></label>
-<label>Media izohi<input name="media_izoh" placeholder="Bo‘yash yakunlandi"></label>
-<label>Mijoz tasdiqlashi<select name="tasdiq_turi"><option value="">Kerak emas</option><option>Hammasini tasdiqlash</option><option>Rang tasdig‘i</option><option>Chizma tasdig‘i</option><option>Material tasdig‘i</option><option>Narx tasdig‘i</option><option>Muddat tasdig‘i</option></select></label>
-<label>Tasdiq izohi<input name="tasdiq_izoh" placeholder="Yangi rangni tasdiqlaysizmi?"></label>
-<label>Holat<select name="holat"><option>Yangi</option><option>Jarayonda</option><option>Tayyor</option><option>Yetkazildi</option></select></label>
-<label>Kechikish sababi<select name="kechikish_turi"><option value="">Yo‘q</option><option>Korxona</option><option>Mijoz</option><option>Material</option><option>Favqulodda holat</option></select></label>
-<label>Kechikish chegirmasi (%/kun)<input type="number" step="0.1" name="kechikish_foiz" value="0"></label>
-<label>Maksimal chegirma %<input type="number" step="0.1" name="maks_chegirma_foiz" value="20"></label>
-<label>Keshbek %<input type="number" step="0.1" name="keshbek_foiz" value="0"></label>
-<label>Keshbek summasi<input type="number" name="keshbek_summa" value="0"></label>
-<label>Kafolat boshlanish<input type="date" name="kafolat_boshlanish"></label>
-<label>Kafolat tugash<input type="date" name="kafolat_tugash"></label>
-<label>Kafolat sharti<textarea name="kafolat_sharti"></textarea></label>
-<label>Lokatsiya havolasi<input name="lokatsiya" placeholder="Google Maps havolasi"></label>
-<label>Mo‘ljal<input name="moljal"></label>
-<label>Qavat<input name="qavat"></label>
-<label>Lift<select name="lift"><option></option><option>Bor</option><option>Yo‘q</option></select></label>
-<label>Katta mashina<select name="katta_mashina"><option></option><option>Kira oladi</option><option>Kira olmaydi</option></select></label>
-<label>Izoh<textarea name="izoh"></textarea></label><button>Saqlash</button><div class="msg"></div></form></div>
-<div class="panel tablewrap"><h3>Buyurtmalar</h3><table><thead><tr><th>Kod</th><th>Mijoz</th><th>Mahsulot</th><th>Narx</th><th>To‘lov</th><th>Qoldiq</th><th>Muddat</th><th>Holat</th><th>Jarayon</th><th>Bosqich</th><th>To‘lov</th><th>Mijoz oynasi</th><th>Hujjatlar</th></tr></thead><tbody id="ordersBody"></tbody></table></div></div></section>
+<div class="form-row"><label>Talab qilinadigan avans<input type="number" step="0.01" name="avans_talab" value="0" min="0"></label><label>To‘lov usuli<select name="tolov_usuli"><option>Naqd</option><option>Bank orqali</option><option>Click</option><option>Payme</option><option>Qarz</option></select></label></div>
+<div class="hint">USD buyurtmada qoldiq dollar holatida saqlanadi. Mijoz so‘mda to‘lasa, har safar o‘sha kunning kursi kiritiladi.</div></div>
+
+<div class="form-section"><div class="form-section-title"><span>3. Ishlab chiqarish</span></div>
+<div class="form-row"><label>O‘lcham<input name="olcham" placeholder="2000×600×2400 mm"></label><label>Soni<input type="number" name="soni" value="1" min="1"></label></div>
+<div class="form-row"><label>Material<input name="material" placeholder="MDF / LDSP / Akril"></label><label>Rang<input name="rang" placeholder="Oq marmar / Yashil"></label></div>
+<div class="form-row"><label>Ishlab chiqarish muddati (kun)<input type="number" name="ishlab_chiqarish_kun" value="0" min="0"></label><label>Taxminiy tayyor sana<input type="date" name="taxminiy_sana"></label></div>
+<div class="form-row"><label>Taxminiy soat<input type="time" name="taxminiy_vaqt" value="18:00"></label><label>Mas’ul xodim<input name="masul_xodim"></label></div></div>
+
+<details class="advanced"><summary>Qo‘shimcha ma’lumotlar</summary>
+<div class="form-row"><label>Rang kodi<input name="rang_kodi" placeholder="RAL 6018"></label><label>Yaltiroqlik<select name="yaltiroqlik"><option></option><option>Mat</option><option>Yarim mat</option><option>Yaltiroq</option></select></label></div>
+<div class="form-row"><label>Avans muddati<input type="date" name="avans_muddat_sana"></label><label>Narx taklifi amal qilish sanasi<input type="date" name="taklif_amal_sana"></label></div>
+<div class="form-row"><label>Chizma versiyasi<input type="number" name="chizma_versiya" value="1" min="1"></label><label>Bepul o‘zgartirish limiti<input type="number" name="bepul_ozgarish_limit" value="2" min="0"></label></div>
+<input type="hidden" name="oraliq_tolov" value="0"><div class="hint">Keyingi barcha to‘lovlarni buyurtmalar jadvalidagi “To‘lov” tugmasi orqali kiriting.</div><label>Kafolat muddati<input name="kafolat_muddati" value="12 oy"></label>
+<div class="form-row"><label>Yetkazish<select name="yetkazish"><option>Kiritilgan</option><option>Kiritilmagan</option><option>Alohida haq</option></select></label><label>Montaj<select name="montaj"><option>Kiritilgan</option><option>Kiritilmagan</option><option>Alohida haq</option></select></label></div>
+<div class="form-row"><label>Boshlanish sana<input type="date" name="boshlanish_sana"></label><label>Tugash sana<input type="date" name="tugash_sana"></label></div>
+<label>Mijozga aloqa telefoni<input name="aloqa_telefon" placeholder="+998..."></label><label>Mijozga ko‘rinadigan izoh<textarea name="mijozga_izoh"></textarea></label>
+<label>Muddat o‘zgarishi / kechikish sababi<textarea name="kechikish_sababi"></textarea></label>
+<div class="form-row"><label>Rasm/video havolasi<input name="media_havola" placeholder="https://..."></label><label>Media turi<select name="media_turi"><option>Rasm</option><option>Video</option><option>Fayl</option></select></label></div>
+<label>Media izohi<input name="media_izoh"></label><label>Mijoz tasdiqlashi<select name="tasdiq_turi"><option value="">Kerak emas</option><option>Hammasini tasdiqlash</option><option>Rang tasdig‘i</option><option>Chizma tasdig‘i</option><option>Material tasdig‘i</option><option>Narx tasdig‘i</option><option>Muddat tasdig‘i</option></select></label>
+<label>Tasdiq izohi<input name="tasdiq_izoh"></label><div class="form-row"><label>Holat<select name="holat"><option>Yangi</option><option>Jarayonda</option><option>Tayyor</option><option>Yetkazildi</option></select></label><label>Kechikish sababi<select name="kechikish_turi"><option value="">Yo‘q</option><option>Korxona</option><option>Mijoz</option><option>Material</option><option>Favqulodda holat</option></select></label></div>
+<div class="form-row"><label>Kechikish chegirmasi (%/kun)<input type="number" step="0.1" name="kechikish_foiz" value="0"></label><label>Maksimal chegirma %<input type="number" step="0.1" name="maks_chegirma_foiz" value="20"></label></div>
+<div class="form-row"><label>Keshbek %<input type="number" step="0.1" name="keshbek_foiz" value="0"></label><label>Keshbek summasi<input type="number" name="keshbek_summa" value="0"></label></div>
+<div class="form-row"><label>Kafolat boshlanish<input type="date" name="kafolat_boshlanish"></label><label>Kafolat tugash<input type="date" name="kafolat_tugash"></label></div>
+<label>Kafolat sharti<textarea name="kafolat_sharti"></textarea></label><label>Lokatsiya havolasi<input name="lokatsiya" placeholder="Google Maps havolasi"></label>
+<div class="form-row"><label>Mo‘ljal<input name="moljal"></label><label>Qavat<input name="qavat"></label></div><div class="form-row"><label>Lift<select name="lift"><option></option><option>Bor</option><option>Yo‘q</option></select></label><label>Katta mashina<select name="katta_mashina"><option></option><option>Kira oladi</option><option>Kira olmaydi</option></select></label></div>
+<label>Izoh<textarea name="izoh"></textarea></label></details>
+<button class="violet">Buyurtmani saqlash</button><div class="msg"></div></form></div>
+
+<div class="panel tablewrap"><div class="table-head"><div><h3 style="margin:0">Buyurtmalar</h3><div class="hint">Narx, jarayon, muddat va hujjatlar bir qatorda</div></div><div class="table-tools"><input id="orderSearch" placeholder="Kod, mijoz yoki mahsulot..."><select id="orderStatusFilter"><option value="">Barcha holatlar</option><option>Yangi</option><option>Jarayonda</option><option>Tayyor</option><option>Yetkazildi</option></select></div></div>
+<table><thead><tr><th>Buyurtma</th><th>Sana</th><th>Holat</th><th>Jarayon</th><th>Umumiy</th><th>To‘langan</th><th>Qoldiq</th><th>Muddat</th><th>Mijoz oynasi</th><th>Hujjatlar</th></tr></thead><tbody id="ordersBody"></tbody></table></div>
+</div></section>
 
 <section id="stock" class="tab"><div class="grid"><div class="panel"><h3>Ombor harakati</h3><form id="stockForm">
 <label>Material<select id="stockSelect" name="material_id" required></select></label><label>Sana<input type="date" name="sana" required></label>
@@ -3967,6 +4126,17 @@ th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:no
 <div class="panel" style="width:min(620px,97%);max-height:90vh;overflow:auto"><h3>Buyurtma bosqichlari</h3><div id="stageWorkflowInfo"></div><div id="stageList"></div><button onclick="closeStage()" style="margin-top:10px">Yopish</button></div>
 </div>
 
+<div id="paymentModal" class="modal-shell">
+<div class="modal-card"><div class="modal-title"><div><h3>💳 Buyurtma to‘lovi</h3><div id="paymentOrderInfo" class="hint"></div></div><button type="button" class="close-btn" onclick="closePaymentModal()">Yopish</button></div>
+<form id="orderPaymentForm"><input type="hidden" name="order_id" id="paymentOrderId"><input type="hidden" id="paymentOrderCurrency">
+<div class="form-row"><label>To‘lov sanasi<input type="date" name="sana" id="paymentDate"></label><label>Qabul qilingan valyuta<select name="tolov_valyutasi" id="paymentCurrency"><option value="UZS">UZS — so‘m</option><option value="USD">USD — dollar</option></select></label></div>
+<label>Qabul qilingan summa<input type="number" step="0.01" min="0" name="qabul_qilingan_summa" id="paymentReceived" required></label>
+<label id="paymentRateLabel">1 USD kursi<input type="number" step="0.01" min="0" name="kurs" id="paymentRate" placeholder="Masalan: 12900"></label>
+<div class="form-row"><label>To‘lov turi<select name="turi"><option>To‘lov</option><option>Avans</option><option>Oraliq to‘lov</option><option>Yakuniy to‘lov</option></select></label><label>Izoh<input name="izoh" placeholder="Naqd / bank orqali..."></label></div>
+<div class="payment-preview"><div><small>Buyurtmadan ayriladi</small><b id="paymentOrderAmount">0</b></div><div><small>So‘mdagi ekvivalent</small><b id="paymentUzsAmount">0 so‘m</b></div></div>
+<div class="currency-note">USD qatnashsa, kurs aynan shu to‘lov bilan saqlanadi va keyinchalik o‘zgarmaydi.</div>
+<button type="submit" class="ok">To‘lovni saqlash</button><div class="msg"></div></form></div></div>
+
 <div id="customerCardModal" style="display:none;position:fixed;inset:0;background:#0009;z-index:25;place-items:center;padding:12px">
 <div class="panel" style="width:min(720px,97%);max-height:92vh;overflow:auto">
 <div style="display:flex;justify-content:space-between;gap:10px;align-items:center"><h3>👤 Mijozga ko‘rinadigan karta</h3><button type="button" class="danger" onclick="closeCustomerCard()">Yopish</button></div>
@@ -3992,6 +4162,11 @@ th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;white-space:no
 <script>
 const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s);
 function setupOrderWorkflowForm(){const t=$('#orderTypeSelect'),c=$('#customStagesLabel');if(!t||!c)return;const sync=()=>{c.style.display=t.value==='Maxsus'?'block':'none'};t.addEventListener('change',sync);sync()}
+function setupOrderCurrencyForm(){
+ const oc=$('#orderCurrency'),pc=$('#initialPaymentCurrency'),row=$('#initialRateRow'),note=$('#currencyRuleNote');if(!oc||!pc)return;
+ const sync=()=>{const usd=oc.value==='USD'||pc.value==='USD';row.style.display=usd?'grid':'none';note.textContent=oc.value==='USD'?'Kelishuv USDda saqlanadi. So‘mda qilingan har bir to‘lov to‘lov kunidagi kurs bo‘yicha dollardan ayriladi.':'Hisob-kitob so‘mda yuritiladi.'};
+ oc.addEventListener('change',()=>{pc.value=oc.value;sync()});pc.addEventListener('change',sync);sync();
+}
 function tashkentDate(){const p=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tashkent',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());const v=Object.fromEntries(p.map(x=>[x.type,x.value]));return `${v.year}-${v.month}-${v.day}`}const today=tashkentDate();$$('input[type=date]').forEach(x=>x.value=today);
 $$('.tabs button').forEach(b=>b.onclick=()=>{$$('.tabs button').forEach(x=>x.classList.remove('active'));$$('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#'+b.dataset.tab).classList.add('active')});
 function esc(s){return String(s===undefined||s===null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -4005,7 +4180,26 @@ async function delWorker(i){if(confirm('O‘chirasizmi?')){await api('/api/ishch
 async function loadTypes(){const a=await api('/api/ish-turlari');$('#workTypeSelect').innerHTML=a.map(x=>`<option value="${esc(x.id)}">${esc(x.kategoriya)} — ${esc(x.nomi)} (${esc(x.birlik)})</option>`).join('')}
 async function loadAttendance(){const a=await api('/api/keldi-ketdi');$('#attendanceBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td>${esc(x.keldi_vaqti)}</td><td>${esc(x.ketdi_vaqti)}</td><td>${esc(x.ish_soatlari)}</td></tr>`).join('')}
 async function loadResults(){const a=await api('/api/natijalar');$('#resultsBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.ish_turi)}</td><td>${esc(x.sana)}</td><td>${esc(x.miqdor)} ${esc(x.birlik)}</td><td>${money(x.jami_haq)}</td><td>${esc(x.buyurtma_kodi||'')}</td></tr>`).join('')}
-async function loadOrders(){const a=await api('/api/buyurtmalar');$$('.orderSelect').forEach(s=>s.innerHTML='<option value="">Tanlang</option>'+a.map(x=>`<option value="${esc(x.id)}">${esc(x.kod)} — ${esc(x.mijoz)}</option>`).join(''));$('#ordersBody').innerHTML=a.map(x=>`<tr><td>${esc(x.kod)}</td><td>${esc(x.mijoz)}</td><td>${esc(x.mahsulot||'')}<br><small>${esc(x.buyurtma_turi||'To‘liq mebel')}</small></td><td>${money(x.umumiy_narx)}</td><td>${money(x.oldindan_tolov)}</td><td class="balance">${money(x.qoldiq)}</td><td>${esc(x.muddat_matn||'Belgilanmagan')}</td><td><span class="badge">${esc(x.holat)}</span><br><small>${esc(x.tolov_sharti||'')}</small></td><td><span id="pr${esc(x.id)}">0%</span></td><td><button onclick="openStage(${esc(x.id)})">Ko‘rish</button></td><td><button onclick="addOrderPayment(${esc(x.id)})">To‘lov</button></td><td><button class="ok" onclick="openCustomerCard(${esc(x.id)})">Sozlash</button> <button onclick="openTrack(${esc(x.id)})">Ochish</button> <button onclick="copyTrack(${esc(x.id)})">Link</button></td><td><a href="/buyurtma/${esc(x.id)}/shartnoma.docx"><button>Word</button></a> <a href="/buyurtma/${esc(x.id)}/shartnoma.pdf" target="_blank"><button>PDF</button></a> <button onclick="regenContract(${esc(x.id)})">Yangilash</button> <a href="/buyurtma/${esc(x.id)}/chek.pdf" target="_blank"><button>Chek</button></a> <a href="/buyurtma/${esc(x.id)}/qr.png" target="_blank"><button class="ok">QR</button></a></td></tr>`).join('')}
+let orderRows=[];
+function amountText(value,currency){const n=Number(value||0);return currency==='USD'?'$'+n.toLocaleString('en-US',{maximumFractionDigits:2}):money(n)+' so‘m'}
+function statusClass(status){const s=String(status||'');if(s.includes('Yangi'))return'new';if(s.includes('Jarayon'))return'progressing';if(s.includes('Tayyor'))return'ready';if(s.includes('Yetkaz')||s.includes('Yop'))return'done';return'waiting'}
+function renderOrders(){
+ const q=($('#orderSearch')?.value||'').toLowerCase().trim(),status=$('#orderStatusFilter')?.value||'';
+ const rows=orderRows.filter(x=>(!status||String(x.holat||'').includes(status))&&(!q||`${x.kod} ${x.mijoz} ${x.mahsulot}`.toLowerCase().includes(q)));
+ $('#ordersBody').innerHTML=rows.length?rows.map(x=>{const c=x.valyuta||'UZS',rate=Number(x.oxirgi_kurs||0),approx=c==='USD'&&rate>0?`≈ ${money(Number(x.qoldiq||0)*rate)} so‘m`:'';return `<tr>
+ <td><span class="order-code">${esc(x.kod)}</span><span class="order-sub">${esc(x.mijoz)} · ${esc(x.mahsulot||'Mebel')}</span></td>
+ <td>${esc(String(x.created_at||'').slice(0,10)||'-')}<span class="order-sub">${esc(x.buyurtma_turi||'To‘liq mebel')}</span></td>
+ <td><span class="badge ${statusClass(x.holat)}">${esc(x.holat)}</span><span class="order-sub">${esc(x.joriy_bosqich||'')}</span></td>
+ <td><div class="progress-track"><div class="progress-fill" style="width:${Math.min(100,Number(x.progress||0))}%"></div></div><b>${esc(x.progress||0)}%</b><span class="order-sub">${esc(x.bosqich_bajarildi||0)}/${esc(x.bosqich_jami||0)} bosqich</span></td>
+ <td><span class="price-main">${amountText(x.umumiy_narx,c)}</span><span class="order-sub">${c}</span></td>
+ <td><span class="price-main" style="color:#168358">${amountText(x.oldindan_tolov,c)}</span>${c==='USD'&&Number(x.tolangan_uzs||0)>0?`<span class="price-sub">${money(x.tolangan_uzs)} so‘m qabul qilindi</span>`:''}</td>
+ <td><span class="price-main balance">${amountText(x.qoldiq,c)}</span><span class="price-sub">${esc(approx||'')}</span></td>
+ <td>${esc(x.muddat_matn||'Belgilanmagan')}<span class="order-sub">${esc(x.tolov_sharti||'')}</span></td>
+ <td><div class="action-group"><button class="violet" onclick="openStage(${esc(x.id)})">Bosqich</button><button class="ok" onclick="addOrderPayment(${esc(x.id)})">To‘lov</button><button class="outline green" onclick="openCustomerCard(${esc(x.id)})">Sozlash</button><button class="outline" onclick="openTrack(${esc(x.id)})">Ochish</button><button class="outline" onclick="copyTrack(${esc(x.id)})">Link</button></div></td>
+ <td><div class="doc-group"><a href="/buyurtma/${esc(x.id)}/shartnoma.docx"><button class="outline">Word</button></a><a href="/buyurtma/${esc(x.id)}/shartnoma.pdf" target="_blank"><button class="outline red">PDF</button></a><button class="outline" onclick="regenContract(${esc(x.id)})">Yangilash</button><a href="/buyurtma/${esc(x.id)}/chek.pdf" target="_blank"><button class="outline green">Chek</button></a><a href="/buyurtma/${esc(x.id)}/qr.png" target="_blank"><button class="ok">QR</button></a></div></td>
+ </tr>`}).join(''):'<tr><td colspan="10" class="empty-row">Mos buyurtma topilmadi.</td></tr>';
+}
+async function loadOrders(){orderRows=await api('/api/buyurtmalar');$$('.orderSelect').forEach(s=>s.innerHTML='<option value="">Tanlang</option>'+orderRows.map(x=>`<option value="${esc(x.id)}">${esc(x.kod)} — ${esc(x.mijoz)}</option>`).join(''));renderOrders()}
 let activeStageOrderId=null;
 async function openStage(id){activeStageOrderId=id;const data=await api('/api/buyurtma/'+id+'/workflow'),a=data.stages||[],o=data.order||{};const done=a.filter(x=>x.bajarildi).length,foiz=a.length?Math.round(done*1000/a.length)/10:0;const trusted=['Avans talab qilinmaydi — ishonchli mijoz','Muddatli to‘lov','Shartnoma asosida to‘lov'].includes(o.tolov_sharti);$('#stageWorkflowInfo').innerHTML=`<div style="margin-bottom:10px;padding:12px;border-radius:12px;background:#f1f5f9"><b>${esc(o.buyurtma_turi||'To‘liq mebel')}</b><br><small>To‘lov: ${esc(o.tolov_sharti||'Avans majburiy')} · Rasmiy muddat: ${esc(o.deadline_text||'Hali boshlanmagan')}</small>${trusted&&!Number(o.rahbar_tasdiq)?`<br><button class="ok" style="margin-top:10px" onclick="managerApprove(${esc(id)})">✅ Rahbar tasdiqladi</button>`:''}</div>`;$('#stageList').innerHTML=`<div style="margin-bottom:10px;padding:10px;border-radius:10px;background:#eff6ff;color:#1d4ed8;font-weight:800">Jarayon: ${foiz}% — ${done}/${a.length} bosqich</div>`+a.map(x=>`<label class="stage"><input type="checkbox" ${x.bajarildi?'checked':''} onchange="toggleStage(${esc(x.id)},this)"> ${esc(x.bosqich)}</label>`).join('');$('#stageModal').style.display='grid'}
 function closeStage(){$('#stageModal').style.display='none';activeStageOrderId=null}
@@ -4026,7 +4220,9 @@ async function loadBonuses(){const a=await api('/api/bonuslar');$('#bonusesBody'
 async function loadStatuses(){const a=await api('/api/ishchi-holatlari');$('#statusesBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td>${esc(x.turi)}</td><td>${esc(x.izoh||'')}</td></tr>`).join('')}
 async function loadFinished(){const a=await api('/api/tayyor-mahsulot');$('#finishedBody').innerHTML=a.map(x=>`<tr><td>${esc(x.nomi)}</td><td>${esc(x.kodi||'')}</td><td>${esc(x.rang||'')}</td><td>${esc(x.miqdor)} ${esc(x.birlik)}</td><td>${money(x.narx)}</td></tr>`).join('')}
 async function loadFinance(){const s=$('#finStart').value||'1900-01-01',e=$('#finEnd').value||'2999-12-31',x=await api(`/api/moliyaviy-xulosa?start=${s}&end=${e}`);$('#fIncome').textContent=money(x.kirim);$('#fExpense').textContent=money(x.xarajat);$('#fSalary').textContent=money(x.ishchi_tolov);$('#fBonus').textContent=money(x.bonus);$('#fProfit').textContent=money(x.sof_foyda)}
-async function addOrderPayment(id){const miqdor=prompt('To‘lov summasi');if(!miqdor)return;await api(`/api/buyurtma/${id}/tolovlar`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sana:today,miqdor})});refresh()}
+function paymentPreview(){const oc=$('#paymentOrderCurrency').value,pc=$('#paymentCurrency').value,received=Number($('#paymentReceived').value||0),rate=Number($('#paymentRate').value||0);let orderAmount=0,uzs=0;if(oc===pc)orderAmount=received;else if(oc==='USD'&&pc==='UZS'&&rate>0)orderAmount=received/rate;else if(oc==='UZS'&&pc==='USD'&&rate>0)orderAmount=received*rate;uzs=pc==='UZS'?received:(rate>0?received*rate:0);$('#paymentRateLabel').style.display=(oc==='USD'||pc==='USD')?'block':'none';$('#paymentOrderAmount').textContent=amountText(orderAmount,oc);$('#paymentUzsAmount').textContent=amountText(uzs,'UZS')}
+function addOrderPayment(id){const o=orderRows.find(x=>Number(x.id)===Number(id));if(!o)return;$('#paymentOrderId').value=id;$('#paymentOrderCurrency').value=o.valyuta||'UZS';$('#paymentOrderInfo').textContent=`${o.kod} · Qoldiq: ${amountText(o.qoldiq,o.valyuta||'UZS')}`;$('#paymentDate').value=today;$('#paymentCurrency').value=o.valyuta||'UZS';$('#paymentReceived').value='';$('#paymentRate').value=Number(o.oxirgi_kurs||0)>0?o.oxirgi_kurs:'';$('#orderPaymentForm').querySelector('.msg').textContent='';paymentPreview();$('#paymentModal').style.display='grid'}
+function closePaymentModal(){$('#paymentModal').style.display='none'}
 async function regenContract(id){try{const x=await api(`/buyurtma/${id}/shartnoma-yaratish`,{method:'POST'});alert('Shartnoma yangilandi. Versiya: '+x.versiya)}catch(e){alert('Xato: '+e.message)}}
 async function copyTrack(id){const x=await api(`/api/buyurtma/${id}/link`);try{await navigator.clipboard.writeText(x.url);alert('Mijoz kuzatuv havolasi nusxalandi')}catch(e){prompt('Havolani nusxalang:',x.url)}}
 let activeCustomerOrderId=null;
@@ -4040,7 +4236,12 @@ async function openCustomerCard(id){
   $('#customerCardModal').style.display='grid';
 }
 function closeCustomerCard(){$('#customerCardModal').style.display='none';activeCustomerOrderId=null}
-async function loadProgress(){const rows=await api('/api/buyurtmalar');for(const x of rows){try{const p=await api(`/api/buyurtma-progress/${esc(x.id)}`),el=$(`#pr${esc(x.id)}`);if(el)el.textContent=p.foiz+'%'}catch(e){}}}
+async function loadProgress(){return}
+const paymentForm=$('#orderPaymentForm');
+['paymentCurrency','paymentReceived','paymentRate'].forEach(id=>{const el=$('#'+id);if(el)el.addEventListener('input',paymentPreview)});
+paymentForm.onsubmit=async e=>{e.preventDefault();const m=paymentForm.querySelector('.msg'),id=$('#paymentOrderId').value,d=fj(paymentForm);delete d.order_id;try{const x=await api(`/api/buyurtma/${id}/tolovlar`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});m.textContent=`✅ Saqlandi: ${amountText(x.buyurtma_summa,x.buyurtma_valyutasi)}`;await refresh();setTimeout(closePaymentModal,700)}catch(err){m.textContent='❌ '+err.message}};
+const orderSearch=$('#orderSearch'),orderStatusFilter=$('#orderStatusFilter');if(orderSearch)orderSearch.addEventListener('input',renderOrders);if(orderStatusFilter)orderStatusFilter.addEventListener('change',renderOrders);
+
 const customerCardForm=$('#customerCardForm');customerCardForm.onsubmit=async e=>{e.preventDefault();const m=customerCardForm.querySelector('.msg');try{const d=fj(customerCardForm),id=d.order_id;delete d.order_id;await api(`/api/buyurtma/${id}/mijoz-kartasi`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});m.textContent='✅ Mijoz kartasi yangilandi';await loadOrders();await openCustomerCard(id)}catch(x){m.textContent='❌ '+x.message}};
 
 
@@ -4052,7 +4253,7 @@ async function deliveryState(id,holat){await api(`/api/yetkazish/${id}/holat`,{m
 async function refresh(){await Promise.all([loadWorkers(),loadTypes(),loadAttendance(),loadResults(),loadOrders(),loadStock(),loadTrips(),loadPayments(),loadPenalties(),loadDashboard(),loadTotals(),loadExpenses(),loadBonuses(),loadStatuses(),loadFinished(),loadFinance(),loadProgress(),loadExtras(),loadService(),loadDelivery()])}
 const rf=$('#ratingForm');rf.onsubmit=async e=>{e.preventDefault();const d=fj(rf),id=d.buyurtma_id;delete d.buyurtma_id;const m=rf.querySelector('.msg');try{await api(`/api/buyurtma/${id}/baho`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});m.textContent='✅ Baho saqlandi'}catch(x){m.textContent='❌ '+x.message}};
 bind('#extraForm','/api/qoshimcha-ish');bind('#serviceForm','/api/servis');bind('#deliveryForm','/api/yetkazish');
-bind('#workerForm','/api/ishchilar');bind('#attendanceForm','/api/keldi-ketdi');bind('#resultForm','/api/natijalar');setupOrderWorkflowForm();bind('#orderForm','/api/buyurtmalar');bind('#stockForm','/api/ombor-harakat');bind('#tripForm','/api/safarlar');bind('#paymentForm','/api/tolovlar');bind('#penaltyForm','/api/jarimalar');bind('#expenseForm','/api/xarajatlar');bind('#bonusForm','/api/bonuslar');bind('#statusForm','/api/ishchi-holatlari');bind('#finishedForm','/api/tayyor-mahsulot');setMonth();$('#finStart').value=$('#totalStart').value;$('#finEnd').value=$('#totalEnd').value;refresh();
+bind('#workerForm','/api/ishchilar');bind('#attendanceForm','/api/keldi-ketdi');bind('#resultForm','/api/natijalar');setupOrderWorkflowForm();setupOrderCurrencyForm();bind('#orderForm','/api/buyurtmalar');bind('#stockForm','/api/ombor-harakat');bind('#tripForm','/api/safarlar');bind('#paymentForm','/api/tolovlar');bind('#penaltyForm','/api/jarimalar');bind('#expenseForm','/api/xarajatlar');bind('#bonusForm','/api/bonuslar');bind('#statusForm','/api/ishchi-holatlari');bind('#finishedForm','/api/tayyor-mahsulot');setMonth();$('#finStart').value=$('#totalStart').value;$('#finEnd').value=$('#totalEnd').value;refresh();
 </script>
 <script>
 (function(){
