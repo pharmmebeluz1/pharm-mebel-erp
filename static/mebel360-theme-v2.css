@@ -1,0 +1,203 @@
+/* MEBEL360_UNIFIED_DESIGN_V2
+   Mebel360° landing sahifasidagi ko'k–moviy–yashil uslubni
+   mavjud ERP, login va xodim kabinetlariga uyg'unlashtiradi. */
+:root{
+  --m360-navy:#07366f;
+  --m360-navy-2:#0a315f;
+  --m360-blue:#078ee8;
+  --m360-cyan:#05bfd0;
+  --m360-green:#4bd116;
+  --m360-green-dark:#179447;
+  --m360-ink:#10233c;
+  --m360-muted:#63738a;
+  --m360-bg:#f4f9fc;
+  --m360-card:rgba(255,255,255,.94);
+  --m360-line:rgba(15,64,111,.13);
+  --m360-shadow:0 16px 45px rgba(7,54,111,.10);
+  --m360-gradient:linear-gradient(110deg,var(--m360-blue),var(--m360-cyan) 58%,var(--m360-green));
+  --nav:var(--m360-navy)!important;
+  --blue:var(--m360-blue)!important;
+  --purple:var(--m360-cyan)!important;
+  --bg:var(--m360-bg)!important;
+  --card:#fff!important;
+  --text:var(--m360-ink)!important;
+  --muted:var(--m360-muted)!important;
+  --ok:var(--m360-green-dark)!important;
+  --line:var(--m360-line)!important;
+}
+html{background:#f5fbff}
+body{
+  color:var(--m360-ink)!important;
+  background:
+    radial-gradient(circle at 8% 10%,rgba(7,142,232,.12),transparent 27%),
+    radial-gradient(circle at 92% 78%,rgba(75,209,22,.11),transparent 28%),
+    linear-gradient(145deg,#f9fcff 0%,#eef9f7 48%,#f7fbff 100%)!important;
+  background-attachment:fixed!important;
+  font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Arial,sans-serif!important;
+}
+body:before,body:after{pointer-events:none}
+
+/* Yuqori panel */
+header,.head{
+  background:
+    radial-gradient(circle at 82% 15%,rgba(5,191,208,.24),transparent 28%),
+    linear-gradient(112deg,#062d61 0%,#075da7 48%,#079fc2 100%)!important;
+  color:#fff!important;
+  border-bottom:1px solid rgba(255,255,255,.16)!important;
+  box-shadow:0 14px 36px rgba(6,45,97,.20)!important;
+}
+header{position:relative;overflow:hidden}
+header:after,.head:after{
+  content:"";position:absolute;inset:auto -70px -95px auto;width:250px;height:250px;
+  border-radius:50%;background:rgba(75,209,22,.12);pointer-events:none
+}
+.top,.head>.wrap{position:relative;z-index:1}
+.brand-logo{
+  background:#fff!important;border:1px solid rgba(255,255,255,.65)!important;
+  box-shadow:0 10px 28px rgba(0,34,82,.24)!important
+}
+.brand-text h1{letter-spacing:-.7px!important;text-shadow:0 2px 14px rgba(0,0,0,.12)}
+.live-clock{
+  background:rgba(255,255,255,.13)!important;border-color:rgba(255,255,255,.25)!important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.13)!important
+}
+.header-actions button{
+  background:rgba(2,35,76,.42)!important;border:1px solid rgba(255,255,255,.20)!important;
+  border-radius:11px!important;box-shadow:none!important
+}
+.header-actions button:hover{background:rgba(255,255,255,.18)!important;filter:none!important}
+.header-actions a:nth-last-child(2) button{background:rgba(23,148,71,.90)!important}
+.header-actions a:last-child button{background:rgba(211,55,76,.94)!important}
+
+/* Kartalar va bo'limlar */
+.box,.card,.panel,.login-shell,.modal-card{
+  background:var(--m360-card)!important;
+  border:1px solid var(--m360-line)!important;
+  box-shadow:var(--m360-shadow)!important;
+}
+.box,.card,.panel{border-radius:18px!important}
+.panel.tablewrap{overflow:auto!important}
+.cards>.card:before{background:linear-gradient(145deg,#e6f4ff,#e9fbf2)!important;border:1px solid rgba(7,142,232,.08)}
+.cards>.card b,.stat b{color:var(--m360-blue)!important}
+.cards>.card:nth-child(2) b{color:#179447!important}
+.cards>.card:nth-child(3) b{color:#0789bd!important}
+.cards>.card:nth-child(4) b{color:#e47a1d!important}
+.cards>.card:nth-child(5) b{color:#0b9a9e!important}
+.cards>.card:nth-child(6) b{color:#d43858!important}
+.card,.box,.panel{transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease}
+.card:hover{border-color:rgba(7,142,232,.20)!important}
+
+/* Tab menyusi */
+.tabs{
+  background:rgba(255,255,255,.92)!important;border:1px solid var(--m360-line)!important;
+  border-radius:16px!important;box-shadow:0 8px 25px rgba(7,54,111,.07)!important;
+  padding:8px!important
+}
+.tabs button{color:#52657c!important;border:1px solid transparent!important}
+.tabs button:hover{background:#eef8fc!important;color:var(--m360-navy)!important;transform:none!important}
+.tabs button.active{
+  color:#fff!important;background:var(--m360-gradient)!important;
+  box-shadow:0 8px 20px rgba(0,149,192,.23)!important;border-color:transparent!important
+}
+
+/* Tugmalar */
+button,.btn,input[type="submit"]{
+  border-radius:11px!important;background:linear-gradient(135deg,var(--m360-blue),#087fc7)!important;
+  box-shadow:0 7px 18px rgba(7,142,232,.18)!important;
+  font-weight:800!important
+}
+button:hover,.btn:hover,input[type="submit"]:hover{transform:translateY(-1px);filter:brightness(.98)}
+.green,button.ok,.btn.ok,input.ok{background:linear-gradient(135deg,#1aa85c,#36bd47)!important;color:#fff!important}
+.ok:not(button):not(.btn):not(input){color:#15803d!important}
+.red,.danger{background:linear-gradient(135deg,#dc3657,#c92543)!important;color:#fff!important}
+.violet{background:linear-gradient(135deg,#078ee8,#05bfd0)!important}
+.secondary,.close-btn{background:#edf5f8!important;color:#29445f!important;box-shadow:none!important}
+.outline{background:#fff!important;color:#086aac!important;border:1px solid #b8dcf0!important;box-shadow:none!important}
+
+/* Form elementlari */
+label{color:#324a62!important}
+input,select,textarea{
+  border:1px solid #d6e3eb!important;border-radius:11px!important;background:#fff!important;
+  color:var(--m360-ink)!important
+}
+input:focus,select:focus,textarea:focus{
+  border-color:var(--m360-cyan)!important;
+  box-shadow:0 0 0 4px rgba(5,191,208,.12)!important
+}
+.form-section,details.advanced{background:#f8fcfd!important;border-color:#dfedf2!important}
+.form-section-title{color:#24445f!important}
+.currency-note,.messages,.msg:not(:empty){background:#edf9fb!important;color:#09637c!important;border:1px solid #d3eef2!important}
+
+/* Jadval */
+.table-head{background:rgba(255,255,255,.96)!important;border-color:var(--m360-line)!important}
+th{background:#f0f8fb!important;color:#486378!important}
+td,th{border-color:#e6eff3!important}
+tbody tr:hover{background:#f5fbfd!important}
+.progress-fill,.progress i,.bar i{background:var(--m360-gradient)!important}
+.progress-track,.progress,.bar{background:#e4eef2!important}
+.order-code{color:var(--m360-navy)!important}
+.order{border-left-color:var(--m360-cyan)!important}
+.order.active{background:#effafb!important}
+.stage.done{background:#effbf3!important;border-color:#9be3b3!important}
+
+/* Badge va holatlar */
+.badge{background:#e8f7fb!important;color:#087291!important}
+.badge.progressing{background:#fff4df!important;color:#a76008!important}
+.badge.ready,.badge.done{background:#e8f9ef!important;color:#117a45!important}
+.badge.waiting{background:#fff0f2!important;color:#b8324b!important}
+.money{color:#148653!important}
+
+/* Login va birinchi sozlash */
+.login-shell{border-radius:30px!important;overflow:hidden!important}
+.brand-panel{
+  background:
+    radial-gradient(circle at 78% 18%,rgba(75,209,22,.22),transparent 31%),
+    linear-gradient(150deg,#062d61,#0772b4 64%,#06aebb)!important
+}
+.login-panel{background:linear-gradient(145deg,#fff,#f7fcfd)!important}
+.login-panel button{background:var(--m360-gradient)!important}
+.role-links a,.links a{color:#0877b8!important}
+body:has(.login-shell),body:has(form.box[method="post"] .icon),body:has(form.box input[name="confirm"]){
+  background:
+    radial-gradient(circle at 12% 16%,rgba(5,191,208,.28),transparent 31%),
+    radial-gradient(circle at 87% 82%,rgba(75,209,22,.20),transparent 34%),
+    linear-gradient(145deg,#061b3d 0%,#075795 51%,#079ba9 100%)!important
+}
+body:has(form.box[method="post"] .icon) form.box{border-radius:26px!important}
+
+/* Splash */
+body:has(.splash){
+  color:var(--m360-navy)!important;
+  background:
+    radial-gradient(circle at 13% 14%,rgba(7,142,232,.20),transparent 32%),
+    radial-gradient(circle at 86% 83%,rgba(75,209,22,.18),transparent 37%),
+    linear-gradient(145deg,#fbfdff,#eaf8f7)!important
+}
+.splash{
+  border-color:rgba(7,142,232,.16)!important;border-radius:34px!important;
+  background:rgba(255,255,255,.88)!important;box-shadow:0 30px 85px rgba(7,54,111,.15)!important
+}
+.splash .clock{color:var(--m360-navy)!important;text-shadow:0 5px 20px rgba(7,54,111,.14)!important}
+.splash .date{color:#39718b!important}.splash .progress{background:#dff2f2!important}
+.splash .bar{background:var(--m360-gradient)!important}.splash .enter{background:var(--m360-gradient)!important}
+
+/* Til tanlash */
+#pharm-lang-box{border-color:var(--m360-line)!important;box-shadow:0 9px 26px rgba(7,54,111,.14)!important}
+#pharm-lang-box button{background:#eaf4f8!important;color:#27445d!important;box-shadow:none!important}
+#pharm-lang-box button.active{background:var(--m360-gradient)!important;color:#fff!important}
+#pharm-lang-box.pharm-lang-inline{background:rgba(255,255,255,.12)!important;border-color:rgba(255,255,255,.24)!important}
+
+/* Telefon */
+@media(max-width:720px){
+  header,.head{padding:13px!important}
+  .wrap{padding:10px!important}
+  .box,.card,.panel{border-radius:15px!important}
+  .tabs{position:sticky;top:0;z-index:8;border-radius:13px!important}
+  .header-actions{gap:6px!important}
+  .header-actions button{padding:8px 9px!important;font-size:11px!important}
+}
+@media(max-width:520px){
+  body{background-attachment:scroll!important}
+  .login-shell{border-radius:22px!important}
+  .splash{border-radius:24px!important}
+}

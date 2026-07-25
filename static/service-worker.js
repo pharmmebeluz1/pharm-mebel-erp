@@ -1,7 +1,7 @@
-const CACHE = 'mebel360-pwa-v1.0.0';
+const CACHE = 'mebel360-pwa-v1.0.1-design';
 const CORE = [
   '/', '/offline.html', '/manifest.webmanifest',
-  '/static/app.css?v=1.0.0', '/static/app.js?v=1.0.0',
+  '/static/app.css?v=1.0.0', '/static/mebel360-theme-v2.css?v=20260725', '/static/app.js?v=1.0.0',
   '/static/assets/mebel360-logo.png', '/static/assets/icon-192.png',
   '/static/assets/icon-512.png', '/static/assets/favicon.png'
 ];

@@ -178,7 +178,7 @@ PHARM_I18N_WIDGET = '\n<!-- PHARM_MEBEL_3_LANGUAGE_SYSTEM_V2 -->\n<style id="pha
 # ---------- MEBEL360° PWA / TELEFON ILOVASI ----------
 MEBEL360_PWA_HEAD = r"""
 <!-- MEBEL360_PWA_V5 -->
-<link rel="manifest" href="/manifest.webmanifest?v=6">
+<link rel="manifest" href="/manifest.webmanifest?v=7">
 <meta name="theme-color" content="#0757a6">
 <meta name="application-name" content="Mebel360°">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -200,7 +200,7 @@ MEBEL360_PWA_BODY = r"""
   'use strict';
   if('serviceWorker' in navigator){
     window.addEventListener('load', function(){
-      navigator.serviceWorker.register('/service-worker.js?v=6', {scope:'/'}).catch(function(){});
+      navigator.serviceWorker.register('/service-worker.js?v=7', {scope:'/'}).catch(function(){});
     });
   }
   var deferredPrompt = null;
@@ -252,8 +252,8 @@ def mebel360_manifest():
 @app.route('/service-worker.js')
 def mebel360_service_worker():
     js = r"""
-const CACHE='mebel360-static-v6';
-const STATIC=['/offline.html','/static/mebel360-logo.png?v=20260722','/static/icons/icon-192.png?v=5','/static/icons/icon-512.png?v=5'];
+const CACHE='mebel360-static-v7';
+const STATIC=['/offline.html','/static/mebel360-theme-v2.css?v=20260725','/static/mebel360-logo.png?v=20260722','/static/icons/icon-192.png?v=5','/static/icons/icon-512.png?v=5'];
 self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE).then(c=>c.addAll(STATIC)).then(()=>self.skipWaiting()))});
 self.addEventListener('activate',event=>{event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim()))});
 self.addEventListener('fetch',event=>{
@@ -293,6 +293,11 @@ def _pharm_inject_language_selector(response):
             if '</head>' in low and 'MEBEL360_PWA_V5' not in page:
                 pos = low.rfind('</head>')
                 page = page[:pos] + MEBEL360_PWA_HEAD + page[pos:]
+                low = page.lower()
+            if '</head>' in low and 'MEBEL360_UNIFIED_DESIGN_V2' not in page:
+                pos = low.rfind('</head>')
+                theme_link = '\n<!-- MEBEL360_UNIFIED_DESIGN_V2 --><link rel="stylesheet" href="/static/mebel360-theme-v2.css?v=20260725">\n'
+                page = page[:pos] + theme_link + page[pos:]
                 low = page.lower()
             additions = ''
             if 'PHARM_MEBEL_3_LANGUAGE_SYSTEM_V2' not in page:

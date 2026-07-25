@@ -1,0 +1,20 @@
+Mebel360° dizayni yangilandi — 25.07.2026
+
+Qilingan ishlar:
+- Boyagi ko‘k, moviy va yashil rangli zamonaviy dizayn asosiy ERPga ulandi.
+- Rahbar, Menejer, Konstruktor, Ishchi va Shofyor kabinetlari bir xil uslubga keltirildi.
+- Login, birinchi sozlash, ochilish oynasi, kartalar, jadvallar, formalar va tugmalar uyg‘unlashtirildi.
+- Telefon ekranlari uchun moslashuv saqlandi.
+- Eski funksiyalar va ma’lumotlar bazasi ishlashiga tegilmadi.
+- Yangi tema: static/mebel360-theme-v2.css
+- Tema barcha HTML sahifalarga app.py orqali avtomatik ulanadi.
+
+GitHubga yuklash:
+1. ZIPni oching.
+2. Ichidagi barcha fayl va papkalarni eski loyiha ustiga yuklang.
+3. Eng muhim o‘zgargan fayllar:
+   - app.py
+   - static/mebel360-theme-v2.css
+   - static/service-worker.js
+4. Commit izohi:
+   Mebel360 dizayni uyg‘unlashtirildi
