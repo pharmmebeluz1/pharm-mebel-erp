@@ -111,6 +111,7 @@ def home():
 
 @app.route("/baho/<order_code>", methods=["GET", "POST"])
 def rate_order(order_code):
+    init_db()
     c = con()
     order = c.execute("""
         SELECT o.*, e.name AS employee_name
