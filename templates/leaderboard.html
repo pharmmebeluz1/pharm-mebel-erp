@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mebel360° — Reyting</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="desktop-wrap">
+  <div class="logo">Mebel360°</div>
+  <h1>Xodimlar reytingi</h1>
+  <p class="sub">Mijoz baholari asosida avtomatik hisoblanadi.</p>
+
+  <div class="table-card">
+    <table>
+      <thead>
+        <tr><th>O‘rin</th><th>Xodim</th><th>Baholar</th><th>O‘rtacha</th><th>Ball</th></tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td>{% if loop.index==1 %}🥇{% elif loop.index==2 %}🥈{% elif loop.index==3 %}🥉{% else %}{{ loop.index }}{% endif %}</td>
+          <td><b>{{ r.name }}</b></td>
+          <td>{{ r.reviews }}</td>
+          <td>⭐ {{ r.avg_stars }}</td>
+          <td><b>{{ r.score }}</b></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p><a href="{{ url_for('home') }}">← Baholash sahifasi</a></p>
+</div>
+</body>
+</html>

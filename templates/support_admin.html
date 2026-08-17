@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mebel360° — Murojaatlar</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="desktop-wrap">
+  <div class="logo">Mebel360°</div>
+  <h1>Qo‘llab-quvvatlash murojaatlari</h1>
+  <div class="table-card">
+    <table>
+      <thead>
+        <tr><th>#</th><th>Buyurtma</th><th>Mavzu</th><th>Murojaat</th><th>Status</th><th>Sana</th></tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td>{{ r.id }}</td>
+          <td>{{ r.order_code or "-" }}</td>
+          <td>{{ r.topic }}</td>
+          <td>{{ r.message }}</td>
+          <td>{{ r.status }}</td>
+          <td>{{ r.created_at }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6">Hozircha murojaat yo‘q.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p><a href="{{ url_for('home') }}">← Baholash sahifasi</a></p>
+</div>
+</body>
+</html>
