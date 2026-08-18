@@ -615,6 +615,9 @@ def init_db():
         izoh TEXT DEFAULT '',
         rasm_havola TEXT DEFAULT '',
         reklama_ruxsat INTEGER DEFAULT 0,
+        xodim_id INTEGER,
+        masul_xodim TEXT DEFAULT '',
+        teglar TEXT DEFAULT '',
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (buyurtma_id) REFERENCES buyurtmalar(id) ON DELETE CASCADE
     );
@@ -1158,6 +1161,16 @@ def init_db():
     stage_cols={r[1] for r in conn.execute("PRAGMA table_info(buyurtma_bosqichlari)").fetchall()}
     for col,typ in {"boshlanish_vaqti":"TEXT DEFAULT ''","tugash_vaqti":"TEXT DEFAULT ''","ishchi":"TEXT DEFAULT ''","izoh":"TEXT DEFAULT ''","media_url":"TEXT DEFAULT ''"}.items():
         if col not in stage_cols: conn.execute(f"ALTER TABLE buyurtma_bosqichlari ADD COLUMN {col} {typ}")
+
+    # V5.3 migratsiya: mijoz yulduzchali bahosini mas'ul xodimga bog'lash
+    rating_cols={r[1] for r in conn.execute("PRAGMA table_info(baholar)").fetchall()}
+    for col,typ in {
+        "xodim_id":"INTEGER",
+        "masul_xodim":"TEXT DEFAULT ''",
+        "teglar":"TEXT DEFAULT ''"
+    }.items():
+        if col not in rating_cols:
+            conn.execute(f"ALTER TABLE baholar ADD COLUMN {col} {typ}")
     # ADMIN_XAVFSIZLIK_V1
     # Eski ochiq admin parolini bir marta shifrlab bazaga ko'chiradi.
     # Keyingi ishga tushirishlarda parol hech qachon TXT yoki CMDda ko'rsatilmaydi.
@@ -2524,6 +2537,98 @@ def public_track_approval(token):
 
 
 # ---------- MIJOZ UCHUN YULDUZCHALI BAHOLASH ----------
+def _rating_name_key(value):
+    """Xodim ismini baho bilan xavfsiz bog'lash uchun bir xil ko'rinishga keltiradi."""
+    return re.sub(r"\s+", " ", str(value or "").strip().casefold())
+
+
+def _resolve_rating_worker(conn, responsible_name):
+    """Buyurtmadagi mas'ul xodim matnidan ishchi ID sini topadi.
+
+    Avval to'liq ism-familiya, keyin yagona ism bo'yicha moslaydi.
+    Noma'lum yoki bir nechta mos keluvchi ism bo'lsa None qaytaradi.
+    """
+    key=_rating_name_key(responsible_name)
+    if not key:
+        return None
+    workers=conn.execute("SELECT id,ism,familiya FROM ishchilar WHERE faol=1").fetchall()
+    exact=[]
+    first=[]
+    for w in workers:
+        full=_rating_name_key(f"{w['ism']} {w['familiya'] or ''}")
+        if full==key:
+            exact.append(int(w['id']))
+        if _rating_name_key(w['ism'])==key:
+            first.append(int(w['id']))
+    if len(exact)==1:
+        return exact[0]
+    if len(first)==1:
+        return first[0]
+    return None
+
+
+def _customer_rating_stats(conn, start="1900-01-01", end="2999-12-31"):
+    """Tanlangan davr uchun mijoz baholarini xodimlar kesimida jamlaydi."""
+    workers=conn.execute("SELECT id,ism,familiya FROM ishchilar WHERE faol=1").fetchall()
+    by_id={int(w['id']):{
+        "baholar_soni":0, "yulduz_jami":0.0, "teglar":{},
+        "ism":str(w['ism'] or ''), "familiya":str(w['familiya'] or '')
+    } for w in workers}
+    name_map={}
+    first_map={}
+    for w in workers:
+        wid=int(w['id'])
+        name_map.setdefault(_rating_name_key(f"{w['ism']} {w['familiya'] or ''}"),[]).append(wid)
+        first_map.setdefault(_rating_name_key(w['ism']),[]).append(wid)
+
+    rows=conn.execute(
+        """SELECT b.*, COALESCE(o.masul_xodim,'') order_masul_xodim
+           FROM baholar b
+           LEFT JOIN buyurtmalar o ON o.id=b.buyurtma_id
+           WHERE date(b.created_at) BETWEEN date(?) AND date(?)
+           ORDER BY b.id""", (start,end)
+    ).fetchall()
+    for r in rows:
+        wid=None
+        if "xodim_id" in r.keys() and r["xodim_id"]:
+            candidate=int(r["xodim_id"])
+            if candidate in by_id:
+                wid=candidate
+        if wid is None:
+            raw=(r["masul_xodim"] if "masul_xodim" in r.keys() else "") or r["order_masul_xodim"]
+            key=_rating_name_key(raw)
+            matches=name_map.get(key,[])
+            if len(matches)==1:
+                wid=matches[0]
+            else:
+                matches=first_map.get(key,[])
+                if len(matches)==1:
+                    wid=matches[0]
+        if wid is None or wid not in by_id:
+            continue
+        item=by_id[wid]
+        stars=max(1,min(5,int(r["umumiy"] or 0)))
+        item["baholar_soni"]+=1
+        item["yulduz_jami"]+=stars
+        raw_tags=str(r["teglar"] or "") if "teglar" in r.keys() else ""
+        for tag in [x.strip() for x in raw_tags.split("|") if x.strip()]:
+            item["teglar"][tag]=item["teglar"].get(tag,0)+1
+
+    result={}
+    for wid,item in by_id.items():
+        count=item["baholar_soni"]
+        avg=round(item["yulduz_jami"]/count,2) if count else 0
+        score=round(avg/5*100,1) if count else 0
+        top_tags=sorted(item["teglar"].items(), key=lambda x:(-x[1],x[0]))[:3]
+        result[wid]={
+            "baholar_soni":count,
+            "ortacha":avg,
+            "ball":score,
+            "top_teglar":[{"nomi":name,"soni":qty} for name,qty in top_tags],
+        }
+    return result
+
+
 CUSTOMER_GOOD_TAGS = [
     ("muomala", "Xushmuomala xodim", "♡"),
     ("sifat", "Ish sifati", "✓"),
@@ -2608,13 +2713,16 @@ def public_track_rating(token):
         note_parts.append("Mijoz izohi: " + comment)
     saved_note = " | ".join(note_parts)
 
-    # Mavjud baholar jadvali bilan to‘liq mos: yulduz umumiy baho sifatida
-    # barcha mezonlarga yoziladi, tanlangan sabablar esa izohda saqlanadi.
+    # Baho mas'ul xodimga bog'lanadi. Ism o'zgarsa ham xodim_id orqali tarix saqlanadi.
+    responsible_name=str(order["masul_xodim"] or "").strip()
+    worker_id=_resolve_rating_worker(c,responsible_name)
     c.execute(
         """INSERT INTO baholar
-           (buyurtma_id,sifat,muddat,muomala,yetkazish,montaj,umumiy,izoh,rasm_havola,reklama_ruxsat)
-           VALUES(?,?,?,?,?,?,?,?,?,?)""",
-        (oid, stars, stars, stars, stars, stars, stars, saved_note, "", 0)
+           (buyurtma_id,sifat,muddat,muomala,yetkazish,montaj,umumiy,izoh,rasm_havola,
+            reklama_ruxsat,xodim_id,masul_xodim,teglar)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (oid, stars, stars, stars, stars, stars, stars, saved_note, "", 0,
+         worker_id, responsible_name, "|".join(selected_labels))
     )
     c.commit()
     c.close()
@@ -3037,7 +3145,43 @@ def totals():
                FROM bonuslar WHERE sana BETWEEN ? AND ? GROUP BY ishchi_id) b ON b.ishchi_id=i.id
     WHERE i.faol=1 ORDER BY reyting DESC,i.ism
     """,(start,end,start,end,start,end,start,end,start,end)).fetchall()
-    c.close(); return jsonify([dict(r) for r in rows])
+    customer_stats=_customer_rating_stats(c,start,end)
+    data=[]
+    for row in rows:
+        item=dict(row)
+        wid=int(item["id"])
+        customer=customer_stats.get(wid,{"baholar_soni":0,"ortacha":0,"ball":0,"top_teglar":[]})
+        # Ichki reytingning nazariy maksimumi 15 ball: 10 ichki baho + 5 ishlab chiqarish bonusi.
+        internal_pct=round(max(0,min(15,float(item.get("reyting") or 0)))/15*100,1)
+        final_pct=round(internal_pct*0.7 + customer["ball"]*0.3,1) if customer["baholar_soni"] else internal_pct
+        item.update({
+            "ichki_reyting_pct":internal_pct,
+            "mijoz_baholar_soni":customer["baholar_soni"],
+            "mijoz_ortacha":customer["ortacha"],
+            "mijoz_ball":customer["ball"],
+            "mijoz_top_teglar":customer["top_teglar"],
+            "yakuniy_reyting":final_pct,
+        })
+        data.append(item)
+    c.close()
+    data.sort(key=lambda x:(-float(x["yakuniy_reyting"]),str(x.get("ism") or "")))
+    return jsonify(data)
+
+
+@app.route("/api/mijoz-xodim-reytingi")
+def customer_employee_rating_api():
+    start=request.args.get("start") or "1900-01-01"
+    end=request.args.get("end") or "2999-12-31"
+    c=get_db()
+    workers=c.execute("SELECT id,ism,familiya,lavozim FROM ishchilar WHERE faol=1").fetchall()
+    stats=_customer_rating_stats(c,start,end)
+    data=[]
+    for w in workers:
+        s=stats.get(int(w["id"]),{"baholar_soni":0,"ortacha":0,"ball":0,"top_teglar":[]})
+        data.append({**dict(w),**s})
+    c.close()
+    data.sort(key=lambda x:(-float(x["ball"]),-int(x["baholar_soni"]),str(x.get("ism") or "")))
+    return jsonify(data)
 
 
 @app.route("/api/dashboard")
@@ -4223,7 +4367,8 @@ h3{margin:0 0 13px;font-size:17px;letter-spacing:-.2px}label{display:block;font-
 <label style="margin:0">Boshlanish<input id="totalStart" type="date"></label><label style="margin:0">Tugash<input id="totalEnd" type="date"></label>
 <button onclick="loadTotals()">Hisoblash</button><button onclick="setMonth()" style="background:#475569">Shu oy</button>
 <a id="csvLink"><button style="background:#16a34a">Excel/CSV</button></a></div>
-<div class="tablewrap"><table><thead><tr><th>O‘rin</th><th>Ishchi</th><th>Lavozim</th><th>Kun</th><th>Soat</th><th>Miqdor</th><th>Ish haqi</th><th>Jarima</th><th>Bonus</th><th>To‘langan</th><th>Qoldiq</th><th>Reyting</th></tr></thead><tbody id="totalsBody"></tbody></table></div>
+<div class="tablewrap"><table><thead><tr><th>O‘rin</th><th>Ishchi</th><th>Lavozim</th><th>Kun</th><th>Soat</th><th>Miqdor</th><th>Ish haqi</th><th>Jarima</th><th>Bonus</th><th>To‘langan</th><th>Qoldiq</th><th>Ichki reyting</th><th>Mijoz bahosi</th><th>Yakuniy reyting</th></tr></thead><tbody id="totalsBody"></tbody></table></div>
+<div class="sub" style="margin-top:10px">Yakuniy reyting: 70% ichki natija + 30% mijoz bahosi. Mijoz bahosi bo‘lmasa, ichki reytingning o‘zi olinadi.</div>
 </div></section>
 
 <section id="expenses" class="tab">
@@ -4400,7 +4545,7 @@ async function loadPayments(){const a=await api('/api/tolovlar');$('#paymentsBod
 async function loadPenalties(){const a=await api('/api/jarimalar');$('#penaltiesBody').innerHTML=a.map(x=>`<tr><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.sana)}</td><td class="minus">${money(x.miqdor)}</td><td>${esc(x.sababi||'')}</td></tr>`).join('')}
 async function loadDashboard(){const x=await api('/api/dashboard');$('#dWorkers').textContent=x.workers;$('#dOrders').textContent=x.orders;$('#dHours').textContent=x.hours;$('#dProduction').textContent=x.production;$('#dKm').textContent=x.km;$('#dLow').textContent=x.low_stock}
 function setMonth(){const d=new Date(),y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0');$('#totalStart').value=`${y}-${m}-01`;$('#totalEnd').value=new Date(y,d.getMonth()+1,0).toISOString().slice(0,10);loadTotals()}
-async function loadTotals(){const s=$('#totalStart').value||'1900-01-01',e=$('#totalEnd').value||'2999-12-31';$('#csvLink').href=`/export/jami.csv?start=${s}&end=${e}`;const a=await api(`/api/jami?start=${s}&end=${e}`);$('#totalsBody').innerHTML=a.map((x,i)=>`<tr><td>${i+1}</td><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.lavozim||'')}</td><td>${esc(x.ish_kunlari)}</td><td>${esc(x.jami_soat)}</td><td>${esc(x.jami_miqdor)}</td><td class="money">${money(x.ish_haqi)}</td><td class="minus">${money(x.jarima)}</td><td class="money">${money(x.bonus)}</td><td>${money(x.tolangan)}</td><td class="balance">${money(x.qoldiq)}</td><td>${esc(x.reyting)}</td></tr>`).join('')}
+async function loadTotals(){const s=$('#totalStart').value||'1900-01-01',e=$('#totalEnd').value||'2999-12-31';$('#csvLink').href=`/export/jami.csv?start=${s}&end=${e}`;const a=await api(`/api/jami?start=${s}&end=${e}`);$('#totalsBody').innerHTML=a.map((x,i)=>{const customer=Number(x.mijoz_baholar_soni||0)?`⭐ ${esc(x.mijoz_ortacha)} <small>(${esc(x.mijoz_baholar_soni)} ta)</small>`:'—';return `<tr><td>${i+1}</td><td>${esc(x.ism)} ${esc(x.familiya||'')}</td><td>${esc(x.lavozim||'')}</td><td>${esc(x.ish_kunlari)}</td><td>${esc(x.jami_soat)}</td><td>${esc(x.jami_miqdor)}</td><td class="money">${money(x.ish_haqi)}</td><td class="minus">${money(x.jarima)}</td><td class="money">${money(x.bonus)}</td><td>${money(x.tolangan)}</td><td class="balance">${money(x.qoldiq)}</td><td>${esc(x.ichki_reyting_pct)}%</td><td>${customer}</td><td><b>${esc(x.yakuniy_reyting)}%</b></td></tr>`}).join('')}
 
 async function loadExpenses(){const a=await api('/api/xarajatlar');$('#expensesBody').innerHTML=a.map(x=>`<tr><td>${esc(x.sana)}</td><td>${esc(x.kategoriya)}</td><td>${esc(x.xarajat_nomi||'')}</td><td class="minus">${money(x.miqdor)}</td><td>${esc(x.tolov_usuli||'Naqd')}</td><td>${esc(x.buyurtma_kodi||'')}</td><td>${esc(x.kimga_berildi||'')}</td><td>${esc(x.tavsifi||'')}</td></tr>`).join('')}
 async function clockIn(){const id=$('#autoWorkerSelect').value,m=$('#attendanceAutoMsg');if(!id){m.textContent='Ishchini tanlang';return}try{const x=await api('/api/davomat/keldi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ishchi_id:id})});m.textContent=`✅ Keldi: ${esc(x.sana)} ${esc(x.vaqt)}`;loadAttendance();loadDashboard()}catch(e){m.textContent='❌ '+e.message}}

@@ -1,0 +1,24 @@
+MEBEL360° — MIJOZ YULDUZCHALI BAHOLASH V2
+
+Qo‘shilgan imkoniyatlar:
+1. Mijoz buyurtma Yakunlandi/Tayyor bo‘lgandan keyin 1–5 yulduz beradi.
+2. 4–5 yulduzda: xushmuomalalik, ish sifati, tozalik, vaqtida kelish,
+   ishga e’tibor va tezkorlik sabablarini belgilashi mumkin.
+3. 1–3 yulduzda: qo‘pol muomala, kechikish, past sifat, tartibsizlik,
+   aloqa qiyinligi yoki boshqa muammoni belgilashi mumkin.
+4. Izoh 500 belgigacha saqlanadi.
+5. Bir buyurtmaga bir marta mijoz bahosi qabul qilinadi.
+6. Baho buyurtmadagi “Mas’ul xodim” bilan bog‘lanadi va xodim ID si saqlanadi.
+7. Rahbar kabinetidagi “Jami/Reyting” bo‘limida:
+   - Ichki reyting
+   - Mijoz bahosi (yulduz va baholar soni)
+   - Yakuniy reyting
+   ko‘rinadi.
+8. Yakuniy reyting formulasi: 70% ichki natija + 30% mijoz bahosi.
+   Agar xodimda hali mijoz bahosi bo‘lmasa, ichki reytingning o‘zi olinadi.
+9. Davr/oy tanlanganda mijoz baholari ham o‘sha davr bo‘yicha hisoblanadi.
+10. Yangi API: /api/mijoz-xodim-reytingi?start=YYYY-MM-DD&end=YYYY-MM-DD
+
+Muhim:
+Mas’ul xodim maydoniga ishchining ro‘yxatdagi ism-familiyasini bir xil yozish tavsiya etiladi.
+Masalan: “Ali Valiyev”.
